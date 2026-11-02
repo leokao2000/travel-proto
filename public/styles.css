@@ -226,10 +226,26 @@ label { display: block; font-size: 0.85rem; color: var(--muted); margin: 0.6rem 
 .block-food .map-link { background: #ffedd5; color: var(--food-ink); }
 .reviews-link {
   display: inline-block; margin-top: 0.35rem; font-size: 0.82rem; font-weight: 700;
-  color: var(--food-ink); text-decoration: none;
+  text-decoration: none;
 }
+.block-food .reviews-link, .block-food .branch-pick { color: var(--food-ink); }
+.block-stay .reviews-link, .block-stay .branch-pick { color: var(--stay-ink); }
+.place-branch { margin-top: 0.35rem; font-size: 0.78rem; color: var(--muted); line-height: 1.35; }
 .place-reviews { margin-top: 0.35rem; font-size: 0.82rem; }
+button.branch-pick {
+  display: inline-block; margin-top: 0.3rem; padding: 0.2rem 0;
+  background: transparent; border: 0; border-radius: 0;
+  font-size: 0.8rem; font-weight: 700;
+}
+button.branch-option {
+  display: block; width: 100%; text-align: left; margin-top: 0.45rem;
+  padding: 0.7rem 0.8rem; border-radius: 12px;
+  background: var(--card); color: var(--ink); border: 1px solid var(--line);
+  font-weight: 500;
+}
+button.branch-option strong { display: block; font-weight: 700; }
 .place-rating { font-weight: 700; color: var(--food-ink); }
+.block-stay .place-rating { color: var(--stay-ink); }
 .place-snippets { margin: 0.2rem 0 0; padding-left: 1rem; }
 .place-snippets li { margin: 0.15rem 0; }
 .places-attr { margin-top: 0.25rem; font-size: 0.72rem; color: var(--muted); }

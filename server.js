@@ -542,6 +542,7 @@ app.post('/api/trips/:tripId/import', async (req, res) => {
 });
 
 const PLACES_CACHE_MS = 7 * 24 * 60 * 60 * 1000;
+const PLACES_ENDPOINT = process.env.PLACES_API_URL || 'https://places.googleapis.com/v1/places:searchText';
 
 function placesApiKey() {
   return String(process.env.GOOGLE_PLACES_API_KEY || '').trim();
@@ -561,12 +562,28 @@ function writePlacesCache(cache) {
 }
 
 function placeSnippet(review) {
-  const text = String(review?.text?.text || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+  const text = String(review?.text?.text || review?.text || '').replace(/\s+/g, ' ').trim().slice(0, 120);
   if (!text) return null;
   return {
     text,
     rating: typeof review.rating === 'number' ? review.rating : null,
     author: String(review.authorAttribution?.displayName || '').slice(0, 40),
+  };
+}
+
+function placeCandidate(place) {
+  const id = String(place?.id || '').trim().slice(0, 200);
+  if (!id) return null;
+  const display = place.displayName;
+  const name = String(typeof display === 'string' ? display : display?.text || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+  return {
+    id,
+    name,
+    address: String(place.formattedAddress || '').replace(/\s+/g, ' ').trim().slice(0, 200),
+    rating: typeof place.rating === 'number' ? place.rating : null,
+    userRatingCount: typeof place.userRatingCount === 'number' ? place.userRatingCount : null,
+    googleMapsUri: typeof place.googleMapsUri === 'string' ? place.googleMapsUri : '',
+    reviews: (place.reviews || []).slice(0, 3).map(placeSnippet).filter(Boolean),
   };
 }
 
@@ -578,22 +595,22 @@ app.get('/api/places/reviews', async (req, res) => {
   const key = placesApiKey();
   if (!key) return res.json({ enabled: false });
   const query = String(req.query.q || '').trim().replace(/\s+/g, ' ').slice(0, 200);
-  if (!query) return res.status(400).json({ enabled: true, error: '缺少餐廳名稱' });
+  if (!query) return res.status(400).json({ enabled: true, error: '缺少名稱' });
   const cacheId = query.toLowerCase();
   const cache = readPlacesCache();
   const hit = cache[cacheId];
-  if (hit?.fetchedAt && Date.now() - new Date(hit.fetchedAt).getTime() < PLACES_CACHE_MS && hit.payload) {
-    return res.json({ enabled: true, cached: true, ...hit.payload });
+  if (hit?.fetchedAt && Array.isArray(hit.payload?.candidates) && Date.now() - new Date(hit.fetchedAt).getTime() < PLACES_CACHE_MS) {
+    return res.json({ enabled: true, cached: true, candidates: hit.payload.candidates });
   }
   try {
-    const upstream = await fetch('https://places.googleapis.com/v1/places:searchText', {
+    const upstream = await fetch(PLACES_ENDPOINT, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'X-Goog-Api-Key': key,
-        'X-Goog-FieldMask': 'places.rating,places.userRatingCount,places.googleMapsUri,places.reviews',
+        'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.rating,places.userRatingCount,places.googleMapsUri,places.reviews',
       },
-      body: JSON.stringify({ textQuery: query, maxResultCount: 1, languageCode: 'zh-TW' }),
+      body: JSON.stringify({ textQuery: query, maxResultCount: 5, languageCode: 'zh-TW' }),
       signal: AbortSignal.timeout(15000),
     });
     const data = await upstream.json().catch(() => ({}));
@@ -601,16 +618,10 @@ app.get('/api/places/reviews', async (req, res) => {
       console.error('places search', upstream.status);
       return res.status(502).json({ enabled: true, error: true });
     }
-    const place = (data.places || [])[0];
-    const payload = place ? {
-      rating: typeof place.rating === 'number' ? place.rating : null,
-      userRatingCount: typeof place.userRatingCount === 'number' ? place.userRatingCount : null,
-      googleMapsUri: typeof place.googleMapsUri === 'string' ? place.googleMapsUri : '',
-      reviews: (place.reviews || []).slice(0, 3).map(placeSnippet).filter(Boolean),
-    } : { rating: null, userRatingCount: null, googleMapsUri: '', reviews: [] };
-    cache[cacheId] = { fetchedAt: new Date().toISOString(), payload };
+    const candidates = (data.places || []).slice(0, 5).map(placeCandidate).filter(Boolean);
+    cache[cacheId] = { fetchedAt: new Date().toISOString(), payload: { candidates } };
     writePlacesCache(cache);
-    res.json({ enabled: true, cached: false, ...payload });
+    res.json({ enabled: true, cached: false, candidates });
   } catch (err) {
     console.error('places search failed', err?.name || 'error');
     res.status(502).json({ enabled: true, error: true });
