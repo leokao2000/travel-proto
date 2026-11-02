@@ -125,6 +125,8 @@ label { display: block; font-size: 0.85rem; color: var(--muted); margin: 0.6rem 
 .row { display: flex; gap: 0.5rem; align-items: center; }
 .row > * { flex: 1; }
 .stack > * + * { margin-top: 0.55rem; }
+#backup-card button { width: 100%; }
+#backup-card input[type="file"] { margin-top: 0.2rem; }
 .chip {
   display: inline-flex; align-items: center; gap: 0.3rem;
   background: var(--accent-soft); color: var(--accent);

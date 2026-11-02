@@ -50,6 +50,7 @@ const state = {
   pollTimer: null,
   lastSync: 0,
   themeOffered: false,
+  googleClientId: '',
   placesEnabled: null,
   placesStatusPending: false,
   placeReviews: {},
@@ -979,6 +980,259 @@ function renderPrivate() {
   });
 }
 
+let driveAccessToken = null;
+
+function taipeiStamp(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Taipei',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(date);
+  const get = (type) => parts.find((part) => part.type === type)?.value || '00';
+  return `${get('year')}-${get('month')}-${get('day')}_${get('hour')}${get('minute')}`;
+}
+
+function safeFileName(title) {
+  const cleaned = String(title || 'trip').replace(/[\\/:*?"<>|\n\r]+/g, ' ').trim().slice(0, 60);
+  return cleaned || 'trip';
+}
+
+function buildBackup(includePrivate) {
+  const trip = state.trip;
+  const payload = {
+    app: 'leo-prototype',
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    trip: {
+      id: trip.id,
+      code: trip.code,
+      title: trip.title,
+      homeCurrency: trip.homeCurrency || 'TWD',
+      countries: trip.countries || [],
+      members: trip.members || [],
+      days: trip.days || {},
+      restaurants: trip.restaurants || [],
+      lodgings: trip.lodgings || [],
+      transports: trip.transports || [],
+      expenses: trip.expenses || [],
+      createdAt: trip.createdAt,
+      updatedAt: trip.updatedAt,
+    },
+  };
+  if (includePrivate) payload.private = loadPrivate();
+  return payload;
+}
+
+function downloadBackup() {
+  const includePrivate = Boolean($('#backup-include-private')?.checked);
+  const payload = buildBackup(includePrivate);
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = `${safeFileName(state.trip.title)}_${taipeiStamp()}.json`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  toast('已下載備份');
+}
+
+function askYesNo(message) {
+  return new Promise((resolve) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'modal-backdrop';
+    wrap.innerHTML = `<div class="modal"><h3>還原備份</h3><p>${escapeHtml(message)}</p><div class="actions"><button type="button" class="secondary" data-no>取消</button><button type="button" data-yes>確定還原</button></div></div>`;
+    document.body.appendChild(wrap);
+    const done = (value) => { wrap.remove(); resolve(value); };
+    $('[data-no]', wrap).addEventListener('click', () => done(false));
+    $('[data-yes]', wrap).addEventListener('click', () => done(true));
+    wrap.addEventListener('click', (event) => { if (event.target === wrap) done(false); });
+  });
+}
+
+async function restoreBackupObject(data, { confirm = false } = {}) {
+  const trip = data?.trip && typeof data.trip === 'object' ? data.trip : data;
+  const res = await fetch('/api/trips/restore', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ trip, memberId: state.memberId, confirm }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (res.status === 409 && body.needsConfirm) {
+    const ok = await askYesNo(body.error || '這份備份會覆寫目前的旅行');
+    if (!ok) return;
+    return restoreBackupObject(data, { confirm: true });
+  }
+  if (!res.ok) throw new Error(body.error || '還原失敗');
+  state.tripId = body.trip.id;
+  if (body.memberId) state.memberId = body.memberId;
+  persistSession();
+  if (data?.private && typeof data.private === 'object') {
+    savePrivate({
+      budgetTwd: data.private.budgetTwd ?? '',
+      spentNotes: data.private.spentNotes ?? '',
+      note: data.private.note ?? '',
+    });
+  }
+  adoptTrip(body.trip);
+  render();
+  toast(body.created ? '已從備份建立旅行' : '已還原旅行');
+}
+
+async function restoreBackupFile(file) {
+  const text = await file.text();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error('這不是有效的 JSON 備份');
+  }
+  await restoreBackupObject(data);
+}
+
+function loadGisScript() {
+  if (window.google?.accounts?.oauth2) return Promise.resolve();
+  const existing = document.getElementById('gis-client');
+  if (existing) {
+    return new Promise((resolve, reject) => {
+      existing.addEventListener('load', () => resolve(), { once: true });
+      existing.addEventListener('error', () => reject(new Error('無法載入 Google 登入')), { once: true });
+    });
+  }
+  return new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.id = 'gis-client';
+    script.src = 'https://accounts.google.com/gsi/client';
+    script.async = true;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error('無法載入 Google 登入'));
+    document.head.appendChild(script);
+  });
+}
+
+function requestDriveToken() {
+  return new Promise((resolve, reject) => {
+    if (!state.googleClientId) {
+      reject(new Error('Google Drive 尚未設定'));
+      return;
+    }
+    if (!window.google?.accounts?.oauth2) {
+      reject(new Error('Google 登入元件尚未載入'));
+      return;
+    }
+    const client = window.google.accounts.oauth2.initTokenClient({
+      client_id: state.googleClientId,
+      scope: 'https://www.googleapis.com/auth/drive.file',
+      callback: (response) => {
+        if (!response || response.error) {
+          driveAccessToken = null;
+          reject(new Error('Google 授權未完成'));
+          return;
+        }
+        driveAccessToken = response.access_token;
+        resolve(response.access_token);
+      },
+    });
+    client.requestAccessToken({ prompt: driveAccessToken ? '' : 'consent' });
+  });
+}
+
+async function driveJson(url, options = {}) {
+  const token = driveAccessToken || await requestDriveToken();
+  const res = await fetch(url, {
+    ...options,
+    headers: { Authorization: `Bearer ${token}`, ...(options.headers || {}) },
+  });
+  if (res.status === 401) {
+    driveAccessToken = null;
+    throw new Error('Google 授權已過期，請再試一次');
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error?.message || 'Google Drive 請求失敗');
+  return data;
+}
+
+async function ensureDriveFolder() {
+  const query = encodeURIComponent("name = 'Leo prototype 備份' and mimeType = 'application/vnd.google-apps.folder' and trashed = false");
+  const listed = await driveJson(`https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id,name)&spaces=drive`);
+  if (listed.files?.[0]?.id) return listed.files[0].id;
+  const created = await driveJson('https://www.googleapis.com/drive/v3/files', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'Leo prototype 備份', mimeType: 'application/vnd.google-apps.folder' }),
+  });
+  return created.id;
+}
+
+async function backupToDrive() {
+  await loadGisScript();
+  const token = await requestDriveToken();
+  driveAccessToken = token;
+  const folderId = await ensureDriveFolder();
+  const includePrivate = Boolean($('#backup-include-private')?.checked);
+  const payload = buildBackup(includePrivate);
+  const filename = `${safeFileName(state.trip.title)}_${taipeiStamp()}.json`;
+  const boundary = `leo_backup_${Date.now()}`;
+  const meta = { name: filename, parents: [folderId], mimeType: 'application/json' };
+  const body = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(payload)}\r\n--${boundary}--`;
+  const data = await driveJson(`https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,webViewLink`, {
+    method: 'POST',
+    headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
+    body,
+  });
+  const box = $('#backup-result');
+  if (box) {
+    box.hidden = false;
+    box.innerHTML = data.webViewLink
+      ? `已備份到 Google Drive：<a href="${escapeHtml(data.webViewLink)}" target="_blank" rel="noopener noreferrer">${escapeHtml(data.name || filename)}</a>`
+      : '已備份到 Google Drive';
+  }
+  toast('已備份到 Google Drive');
+}
+
+async function listDriveBackups() {
+  const folderId = await ensureDriveFolder();
+  const query = encodeURIComponent(`'${folderId}' in parents and trashed = false and mimeType = 'application/json'`);
+  const listed = await driveJson(`https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id,name,modifiedTime,webViewLink)&orderBy=modifiedTime desc&pageSize=30`);
+  return listed.files || [];
+}
+
+async function restoreFromDrive() {
+  await loadGisScript();
+  const files = await listDriveBackups();
+  if (!files.length) {
+    toast('Drive 裡還沒有這個 App 建立的備份');
+    return;
+  }
+  const wrap = document.createElement('div');
+  wrap.className = 'modal-backdrop';
+  wrap.innerHTML = `<div class="modal"><h3>從 Google Drive 還原</h3><div class="muted">只會列出這個 App 建立的 JSON 備份。</div>${files.map((file) => `<button type="button" class="branch-option" data-drive-file="${escapeHtml(file.id)}"><strong>${escapeHtml(file.name)}</strong></button>`).join('')}<div class="actions"><button type="button" class="secondary" data-cancel>關閉</button></div></div>`;
+  document.body.appendChild(wrap);
+  const close = () => wrap.remove();
+  $('[data-cancel]', wrap).addEventListener('click', close);
+  wrap.addEventListener('click', (event) => { if (event.target === wrap) close(); });
+  $$('[data-drive-file]', wrap).forEach((button) => button.addEventListener('click', async () => {
+    button.disabled = true;
+    try {
+      const token = driveAccessToken || await requestDriveToken();
+      const res = await fetch(`https://www.googleapis.com/drive/v3/files/${button.dataset.driveFile}?alt=media`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error('無法讀取備份檔');
+      const data = await res.json();
+      close();
+      await restoreBackupObject(data);
+    } catch (err) {
+      button.disabled = false;
+      toast(err.message || '還原失敗');
+    }
+  }));
+}
+
 function renderMembers() {
   const el = $('#tab-more');
   el.innerHTML = `
@@ -996,12 +1250,49 @@ function renderMembers() {
         </div>
       `).join('')}
     </div>
+    <div class="card stack" id="backup-card">
+      <h2>備份與還原</h2>
+      <div class="muted">Render 免費方案的檔案在重新部署後可能消失。下載或備份到 Google Drive 可以留一份。</div>
+      <label class="import-check"><input id="backup-include-private" type="checkbox" /> 一併包含這台裝置的私人預算</label>
+      <button type="button" id="btn-download-backup">下載備份（JSON）</button>
+      <label for="backup-file">從檔案還原</label>
+      <input id="backup-file" type="file" accept="application/json,.json" />
+      <button type="button" id="btn-drive-backup" ${state.googleClientId ? '' : 'disabled'}>備份到 Google Drive</button>
+      <button type="button" class="secondary" id="btn-drive-restore" ${state.googleClientId ? '' : 'disabled'}>從 Google Drive 還原</button>
+      <div class="muted" id="drive-note" ${state.googleClientId ? 'hidden' : ''}>Google Drive 尚未設定</div>
+      <div class="muted" id="backup-result" hidden></div>
+    </div>
     <div class="card stack">
       <button class="secondary" type="button" id="btn-leave">離開此旅行（本裝置）</button>
       <div class="muted">離開只清除本機工作階段，不會刪除伺服器上的群組資料。</div>
     </div>
   `;
   bindThemePicker(el);
+  $('#btn-download-backup')?.addEventListener('click', downloadBackup);
+  $('#backup-file')?.addEventListener('change', async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    try {
+      await restoreBackupFile(file);
+    } catch (err) {
+      toast(err.message || '還原失敗');
+    }
+  });
+  $('#btn-drive-backup')?.addEventListener('click', async () => {
+    try {
+      await backupToDrive();
+    } catch (err) {
+      toast(err.message || '備份失敗');
+    }
+  });
+  $('#btn-drive-restore')?.addEventListener('click', async () => {
+    try {
+      await restoreFromDrive();
+    } catch (err) {
+      toast(err.message || '還原失敗');
+    }
+  });
   $('#btn-leave')?.addEventListener('click', () => {
     localStorage.removeItem('tp_tripId');
     localStorage.removeItem('tp_memberId');
@@ -2131,6 +2422,13 @@ async function boot() {
   try {
     await loadRates(false);
   } catch (_) {}
+  try {
+    const config = await api('/api/config');
+    state.googleClientId = String(config.googleClientId || '').trim();
+    if (state.googleClientId) loadGisScript().catch(() => {});
+  } catch (_) {
+    state.googleClientId = '';
+  }
   if (state.tripId && state.memberId) {
     try {
       const data = await api(`/api/trips/${state.tripId}`);

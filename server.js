@@ -16,7 +16,7 @@ const inviteCode = customAlphabet('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', 6);
 const id = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 10);
 
 app.use((req, res, next) => {
-  const big = req.method === 'POST' && /\/import$/.test(req.path);
+  const big = req.method === 'POST' && /\/(import|restore)$/.test(req.path);
   return express.json({ limit: big ? '16mb' : '1mb' })(req, res, next);
 });
 app.use(express.static(path.join(__dirname, 'public')));
@@ -121,6 +121,10 @@ app.get('/api/health', (_req, res) => {
   res.json({ ok: true });
 });
 
+app.get('/api/config', (_req, res) => {
+  res.json({ googleClientId: String(process.env.GOOGLE_OAUTH_CLIENT_ID || '').trim() });
+});
+
 app.get('/api/meta', (_req, res) => {
   res.json({
     currencies: SUPPORTED_CURRENCIES,
@@ -192,6 +196,68 @@ app.get('/api/trips/:tripId', (req, res) => {
     return res.json({ unchanged: true, updatedAt: trip.updatedAt });
   }
   res.json({ trip: publicTrip(trip) });
+});
+
+function clipId(value) {
+  const text = String(value || '').trim();
+  return /^[a-zA-Z0-9_-]{1,40}$/.test(text) ? text : '';
+}
+
+function sanitizeBackupTrip(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { error: '備份格式不正確' };
+  const tripId = clipId(raw.id);
+  const code = String(raw.code || '').trim().toUpperCase();
+  const title = String(raw.title || '').trim().slice(0, 80);
+  if (!tripId) return { error: '備份缺少有效的旅行編號' };
+  if (!/^[A-Z0-9]{4,12}$/.test(code)) return { error: '備份的邀請碼無效' };
+  if (!title) return { error: '備份缺少旅行名稱' };
+  const members = asList(raw.members).map((member) => {
+    const memberId = clipId(member?.id);
+    const nickname = String(member?.nickname || '').trim().slice(0, 40);
+    if (!memberId || !nickname) return null;
+    return { id: memberId, nickname, joinedAt: member.joinedAt || new Date().toISOString() };
+  }).filter(Boolean);
+  if (!members.length) return { error: '備份沒有成員' };
+  const days = raw.days && typeof raw.days === 'object' && !Array.isArray(raw.days) ? raw.days : {};
+  return {
+    trip: {
+      id: tripId,
+      code,
+      title,
+      homeCurrency: 'TWD',
+      countries: asList(raw.countries),
+      members,
+      days,
+      restaurants: asList(raw.restaurants),
+      lodgings: asList(raw.lodgings),
+      transports: asList(raw.transports),
+      expenses: asList(raw.expenses),
+      createdAt: raw.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    },
+  };
+}
+
+app.post('/api/trips/restore', (req, res) => {
+  const parsed = sanitizeBackupTrip(req.body?.trip);
+  if (parsed.error) return res.status(400).json({ error: parsed.error });
+  const incoming = parsed.trip;
+  const memberId = clipId(req.body?.memberId);
+  const db = readDb();
+  const existing = db.trips[incoming.id];
+  const codeOwner = Object.values(db.trips).find((trip) => String(trip.code || '').toUpperCase() === incoming.code && trip.id !== incoming.id);
+  if (codeOwner) return res.status(409).json({ error: '邀請碼已被其他旅行使用' });
+  if (existing && req.body?.confirm !== true) {
+    return res.status(409).json({ error: '這份備份會覆寫目前的旅行，請再確認一次', needsConfirm: true });
+  }
+  if (memberId && !incoming.members.some((member) => member.id === memberId)) {
+    const nick = existing?.members?.find((member) => member.id === memberId)?.nickname || '還原者';
+    incoming.members.push({ id: memberId, nickname: String(nick).slice(0, 40), joinedAt: new Date().toISOString() });
+  }
+  if (existing?.createdAt) incoming.createdAt = existing.createdAt;
+  db.trips[incoming.id] = incoming;
+  writeDb(db);
+  res.json({ trip: publicTrip(incoming), created: !existing, memberId: memberId || incoming.members[0].id });
 });
 
 app.put('/api/trips/:tripId', (req, res) => {
