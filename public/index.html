@@ -6,6 +6,13 @@
   <meta name="theme-color" content="#ecfeff" />
   <title>旅途夥伴 · 旅行原型</title>
   <link rel="stylesheet" href="/styles.css" />
+  <script>
+    (function () {
+      try {
+        document.documentElement.dataset.theme = localStorage.getItem('tp_theme') || 'mint';
+      } catch (e) {}
+    })();
+  </script>
 </head>
 <body>
   <div id="home" class="app">
@@ -14,6 +21,7 @@
       <div class="sub">多國時間軸 · 邀請碼群組 · 分帳 · 私人預算</div>
     </div>
     <div class="content">
+      <div id="theme-slot"></div>
       <div class="card">
         <h2>建立新旅行</h2>
         <form id="form-create" class="stack">
@@ -35,7 +43,7 @@
         </form>
       </div>
       <div class="card muted">
-        原型說明：群組行程與帳本存在伺服器並約每 7 秒同步；私人預算只存在你的手機瀏覽器。結算以 TWD 為基準，匯率為預估匯率（約每週更新，可手動立即更新）。支援幣別：EUR、CHF、JPY、TWD、CNY、HKD、AUD、NZD、KRW。
+        原型說明：群組行程（活動、餐廳、住宿、交通，可匯入截圖或 PDF）與帳本存在伺服器並約每 7 秒同步；私人預算、主題色與自備的匯入金鑰只存在你的手機瀏覽器。結算以 TWD 為基準，匯率為預估匯率（約每週更新，可手動立即更新）。支援幣別：EUR、CHF、JPY、TWD、CNY、HKD、AUD、NZD、KRW。
       </div>
     </div>
   </div>
