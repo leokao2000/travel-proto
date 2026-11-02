@@ -1027,25 +1027,213 @@ function buildBackup(includePrivate) {
   return payload;
 }
 
-function downloadBackup() {
-  const includePrivate = Boolean($('#backup-include-private')?.checked);
-  const payload = buildBackup(includePrivate);
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+function backupFileName(payload) {
+  const title = payload?.trip?.title || state.trip?.title;
+  return `${safeFileName(title)}_${taipeiStamp()}.json`;
+}
+
+function triggerDownload(filename, json) {
+  const blob = new Blob([json], { type: 'application/json' });
   const link = document.createElement('a');
   link.href = URL.createObjectURL(blob);
-  link.download = `${safeFileName(state.trip.title)}_${taipeiStamp()}.json`;
+  link.download = filename;
   document.body.appendChild(link);
   link.click();
   link.remove();
   setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+}
+
+async function saveBackupFile(filename, payload) {
+  const json = JSON.stringify(payload, null, 2);
+  const file = new File([json], filename, { type: 'application/json' });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file], title: filename });
+      toast('已開啟分享');
+      return;
+    } catch (err) {
+      if (err?.name === 'AbortError') return;
+    }
+  }
+  if (typeof window.showSaveFilePicker === 'function') {
+    try {
+      const handle = await window.showSaveFilePicker({
+        suggestedName: filename,
+        types: [{ description: 'JSON 備份', accept: { 'application/json': ['.json'] } }],
+      });
+      const writable = await handle.createWritable();
+      await writable.write(json);
+      await writable.close();
+      toast('已儲存檔案');
+      return;
+    } catch (err) {
+      if (err?.name === 'AbortError') return;
+    }
+  }
+  triggerDownload(filename, json);
   toast('已下載備份');
 }
 
-function askYesNo(message) {
+function downloadBackup() {
+  const includePrivate = Boolean($('#backup-include-private')?.checked);
+  const payload = buildBackup(includePrivate);
+  triggerDownload(backupFileName(payload), JSON.stringify(payload, null, 2));
+  toast('已下載備份');
+}
+
+function openBackupDb() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open('leo-prototype', 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains('backups')) {
+        db.createObjectStore('backups', { keyPath: 'id' });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error('無法開啟本機備份'));
+  });
+}
+
+function backupStore(db, mode) {
+  return db.transaction('backups', mode).objectStore('backups');
+}
+
+async function listDeviceBackups() {
+  const db = await openBackupDb();
+  const records = await new Promise((resolve, reject) => {
+    const request = backupStore(db, 'readonly').getAll();
+    request.onsuccess = () => resolve(request.result || []);
+    request.onerror = () => reject(request.error);
+  });
+  db.close();
+  return records.sort((a, b) => String(b.savedAt).localeCompare(String(a.savedAt)));
+}
+
+async function saveDeviceBackup() {
+  if (navigator.storage?.persist) {
+    try { await navigator.storage.persist(); } catch (_) { /* best effort */ }
+  }
+  const includePrivate = Boolean($('#backup-include-private')?.checked);
+  const payload = buildBackup(includePrivate);
+  const json = JSON.stringify(payload);
+  const record = {
+    id: uid(),
+    tripId: state.trip.id,
+    tripTitle: state.trip.title || '未命名',
+    savedAt: new Date().toISOString(),
+    stamp: taipeiStamp(),
+    filename: backupFileName(payload),
+    size: new Blob([json]).size,
+    payload,
+  };
+  const db = await openBackupDb();
+  await new Promise((resolve, reject) => {
+    const request = backupStore(db, 'readwrite').put(record);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+  db.close();
+  toast('已存到這台裝置');
+  await refreshDeviceBackupList();
+}
+
+async function deleteDeviceBackup(id) {
+  const db = await openBackupDb();
+  await new Promise((resolve, reject) => {
+    const request = backupStore(db, 'readwrite').delete(id);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+  db.close();
+}
+
+function formatBytes(size) {
+  const n = Number(size) || 0;
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(n < 10240 ? 1 : 0)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function deviceBackupHtml(records) {
+  if (!records.length) return '<div class="muted">這台裝置還沒有備份</div>';
+  const groups = [];
+  for (const record of records) {
+    const key = record.tripId || record.tripTitle || 'unknown';
+    let group = groups.find((item) => item.key === key);
+    if (!group) {
+      group = { key, title: record.tripTitle || '未命名', items: [] };
+      groups.push(group);
+    }
+    group.items.push(record);
+  }
+  return groups.map((group) => `
+    <div class="device-backup-group">
+      <div class="device-backup-trip">${escapeHtml(group.title)}${group.key === state.tripId ? '（目前）' : ''}</div>
+      ${group.items.map((record) => `
+        <div class="device-backup-item">
+          <div>${escapeHtml(record.stamp || '')}</div>
+          <div class="muted">${formatBytes(record.size)}</div>
+          <div class="device-backup-actions">
+            <button type="button" class="secondary" data-device-restore="${escapeHtml(record.id)}">還原</button>
+            <button type="button" class="secondary" data-device-export="${escapeHtml(record.id)}">另存檔案</button>
+            <button type="button" class="secondary" data-device-delete="${escapeHtml(record.id)}">刪除</button>
+          </div>
+        </div>
+      `).join('')}
+    </div>
+  `).join('');
+}
+
+async function refreshDeviceBackupList() {
+  const host = $('#device-backup-list');
+  if (!host) return;
+  let records = [];
+  try {
+    records = await listDeviceBackups();
+  } catch (_) {
+    host.innerHTML = '<div class="muted">無法讀取這台裝置的備份</div>';
+    return;
+  }
+  if (!document.body.contains(host)) return;
+  host.innerHTML = deviceBackupHtml(records);
+  const byId = new Map(records.map((record) => [record.id, record]));
+  $$('[data-device-restore]', host).forEach((button) => button.addEventListener('click', async () => {
+    const record = byId.get(button.dataset.deviceRestore);
+    if (!record) return;
+    try {
+      await restoreBackupObject(record.payload);
+    } catch (err) {
+      toast(err.message || '還原失敗');
+    }
+  }));
+  $$('[data-device-export]', host).forEach((button) => button.addEventListener('click', async () => {
+    const record = byId.get(button.dataset.deviceExport);
+    if (!record) return;
+    try {
+      await saveBackupFile(record.filename || backupFileName(record.payload), record.payload);
+    } catch (err) {
+      toast(err.message || '無法另存檔案');
+    }
+  }));
+  $$('[data-device-delete]', host).forEach((button) => button.addEventListener('click', async () => {
+    const ok = await askYesNo('要刪除這份裝置備份嗎？此動作無法復原。', { title: '刪除備份', yes: '刪除' });
+    if (!ok) return;
+    try {
+      await deleteDeviceBackup(button.dataset.deviceDelete);
+      toast('已刪除備份');
+      await refreshDeviceBackupList();
+    } catch (err) {
+      toast(err.message || '無法刪除');
+    }
+  }));
+}
+
+function askYesNo(message, { title = '還原備份', yes = '確定還原', no = '取消' } = {}) {
   return new Promise((resolve) => {
     const wrap = document.createElement('div');
     wrap.className = 'modal-backdrop';
-    wrap.innerHTML = `<div class="modal"><h3>還原備份</h3><p>${escapeHtml(message)}</p><div class="actions"><button type="button" class="secondary" data-no>取消</button><button type="button" data-yes>確定還原</button></div></div>`;
+    wrap.innerHTML = `<div class="modal"><h3>${escapeHtml(title)}</h3><p>${escapeHtml(message)}</p><div class="actions"><button type="button" class="secondary" data-no>${escapeHtml(no)}</button><button type="button" data-yes>${escapeHtml(yes)}</button></div></div>`;
     document.body.appendChild(wrap);
     const done = (value) => { wrap.remove(); resolve(value); };
     $('[data-no]', wrap).addEventListener('click', () => done(false));
@@ -1254,13 +1442,19 @@ function renderMembers() {
       <h2>備份與還原</h2>
       <div class="muted">Render 免費方案的檔案在重新部署後可能消失。下載或備份到 Google Drive 可以留一份。</div>
       <label class="import-check"><input id="backup-include-private" type="checkbox" /> 一併包含這台裝置的私人預算</label>
-      <button type="button" id="btn-download-backup">下載備份（JSON）</button>
-      <label for="backup-file">從檔案還原</label>
-      <input id="backup-file" type="file" accept="application/json,.json" />
-      <button type="button" id="btn-drive-backup" ${state.googleClientId ? '' : 'disabled'}>備份到 Google Drive</button>
+      <div class="backup-choices">
+        <button type="button" id="btn-save-device">存到這台裝置</button>
+        <button type="button" class="secondary" id="btn-download-backup">下載備份（JSON）</button>
+        <button type="button" class="secondary" id="btn-drive-backup" ${state.googleClientId ? '' : 'disabled'}>備份到 Google Drive</button>
+      </div>
       <button type="button" class="secondary" id="btn-drive-restore" ${state.googleClientId ? '' : 'disabled'}>從 Google Drive 還原</button>
       <div class="muted" id="drive-note" ${state.googleClientId ? 'hidden' : ''}>Google Drive 尚未設定</div>
+      <label for="backup-file">從檔案還原</label>
+      <input id="backup-file" type="file" accept=".json,application/json,text/json" />
       <div class="muted" id="backup-result" hidden></div>
+      <h3 class="device-backup-heading">這台裝置上的備份</h3>
+      <div id="device-backup-list"><div class="muted">讀取中…</div></div>
+      <div class="muted">存在這台裝置的備份只有這台看得到；要換裝置，請用『另存檔案』再在另一台用『從檔案還原』。清除瀏覽器資料會刪除這些備份。</div>
     </div>
     <div class="card stack">
       <button class="secondary" type="button" id="btn-leave">離開此旅行（本裝置）</button>
@@ -1268,6 +1462,14 @@ function renderMembers() {
     </div>
   `;
   bindThemePicker(el);
+  $('#btn-save-device')?.addEventListener('click', async () => {
+    try {
+      await saveDeviceBackup();
+    } catch (err) {
+      toast(err.message || '無法存到這台裝置');
+    }
+  });
+  refreshDeviceBackupList();
   $('#btn-download-backup')?.addEventListener('click', downloadBackup);
   $('#backup-file')?.addEventListener('change', async (event) => {
     const file = event.target.files?.[0];

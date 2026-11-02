@@ -125,8 +125,29 @@ label { display: block; font-size: 0.85rem; color: var(--muted); margin: 0.6rem 
 .row { display: flex; gap: 0.5rem; align-items: center; }
 .row > * { flex: 1; }
 .stack > * + * { margin-top: 0.55rem; }
-#backup-card button { width: 100%; }
+#backup-card .backup-choices {
+  display: grid;
+  gap: 0.45rem;
+}
+#backup-card .backup-choices button,
+#backup-card > button { width: 100%; }
 #backup-card input[type="file"] { margin-top: 0.2rem; }
+.device-backup-heading { margin: 0.8rem 0 0.2rem; font-size: 0.95rem; }
+.device-backup-trip { margin-top: 0.55rem; font-size: 0.82rem; color: var(--muted); }
+.device-backup-item {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.55rem 0.65rem;
+  margin-top: 0.4rem;
+  background: var(--card);
+}
+.device-backup-actions { display: flex; gap: 0.35rem; margin-top: 0.4rem; }
+.device-backup-actions button {
+  flex: 1;
+  width: auto;
+  padding: 0.45rem 0.25rem;
+  font-size: 0.78rem;
+}
 .chip {
   display: inline-flex; align-items: center; gap: 0.3rem;
   background: var(--accent-soft); color: var(--accent);
