@@ -497,6 +497,7 @@ function showApp() {
   $('#app').classList.remove('hidden');
   render();
   startPolling();
+  notifyDrafts();
 }
 
 function currencyOptions(selected = 'TWD') {
@@ -1028,23 +1029,210 @@ function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+const DRAFT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const DRAFT_PREFIX = 'tp_draft_';
+
+function draftStorageKey(meta) {
+  const trip = state.tripId || 'none';
+  return `${DRAFT_PREFIX}${trip}_${meta.type}_${meta.id || 'new'}_${meta.day || ''}`;
+}
+
+function readDraft(key) {
+  try {
+    const raw = JSON.parse(localStorage.getItem(key) || 'null');
+    if (!raw?.savedAt || !raw.fields) {
+      localStorage.removeItem(key);
+      return null;
+    }
+    if (Date.now() - Number(raw.savedAt) > DRAFT_TTL_MS) {
+      localStorage.removeItem(key);
+      return null;
+    }
+    return raw;
+  } catch {
+    return null;
+  }
+}
+
+function listTripDrafts() {
+  const prefix = `${DRAFT_PREFIX}${state.tripId || 'none'}_`;
+  const keys = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (key && key.startsWith(prefix)) keys.push(key);
+  }
+  return keys.map((key) => {
+    const raw = readDraft(key);
+    return raw ? { key, ...raw } : null;
+  }).filter(Boolean).sort((a, b) => b.savedAt - a.savedAt);
+}
+
+function draftFieldNodes(root) {
+  return [...root.querySelectorAll('input, textarea, select')].filter((el) => {
+    if (el.type === 'password' || el.type === 'file' || el.type === 'hidden') return false;
+    if (el.id && /key|token|secret|password|openai/i.test(el.id)) return false;
+    return Boolean(el.id) || el.classList.contains('e-split');
+  });
+}
+
+function draftFieldKey(el) {
+  return el.classList.contains('e-split') ? `split:${el.value}` : el.id;
+}
+
+function collectFields(root) {
+  const fields = {};
+  draftFieldNodes(root).forEach((el) => {
+    const key = draftFieldKey(el);
+    if (!key) return;
+    fields[key] = el.type === 'checkbox' ? el.checked : el.value;
+  });
+  return fields;
+}
+
+function applyFields(root, fields) {
+  draftFieldNodes(root).forEach((el) => {
+    const key = draftFieldKey(el);
+    if (!key || !Object.prototype.hasOwnProperty.call(fields, key)) return;
+    if (el.type === 'checkbox') el.checked = Boolean(fields[key]);
+    else el.value = fields[key] ?? '';
+  });
+}
+
+function fieldsEqual(a, b) {
+  const keys = new Set([...Object.keys(a || {}), ...Object.keys(b || {})]);
+  for (const key of keys) if ((a || {})[key] !== (b || {})[key]) return false;
+  return true;
+}
+
+function clearDraft(metaOrKey) {
+  const key = typeof metaOrKey === 'string' ? metaOrKey : draftStorageKey(metaOrKey);
+  localStorage.removeItem(key);
+}
+
 function openModal(title, bodyHtml, onSubmit, opts = {}) {
   const wrap = document.createElement('div');
   wrap.className = 'modal-backdrop';
-  wrap.innerHTML = `<div class="modal"><h3>${escapeHtml(title)}</h3>${bodyHtml}<div class="actions"><button type="button" class="secondary" data-cancel>${escapeHtml(opts.cancelLabel || '取消')}</button><button type="button" data-ok>${escapeHtml(opts.okLabel || '確定')}</button></div></div>`;
+  wrap.innerHTML = `<div class="modal"><h3>${escapeHtml(title)}</h3><div id="draft-banner" class="draft-banner" hidden></div>${bodyHtml}<div id="draft-saved" class="draft-saved" hidden>草稿已暫存</div><div class="actions"><button type="button" class="secondary" data-cancel>${escapeHtml(opts.cancelLabel || '取消')}</button><button type="button" data-ok>${escapeHtml(opts.okLabel || '確定')}</button></div><div id="draft-ask" class="draft-ask" hidden><div>要保留草稿嗎？</div><div class="actions"><button type="button" class="secondary" data-draft-keep>保留</button><button type="button" data-draft-drop>捨棄</button></div></div></div>`;
   document.body.appendChild(wrap);
-  const close = () => wrap.remove();
-  wrap.addEventListener('click', (e) => { if (e.target === wrap) close(); });
-  $('[data-cancel]', wrap).addEventListener('click', close);
+  const modal = $('.modal', wrap);
+  const draftKey = opts.draft ? draftStorageKey(opts.draft) : '';
+  const baseline = collectFields(modal);
+  let timer = null;
+
+  function flush() {
+    if (!draftKey) return;
+    const fields = collectFields(modal);
+    if (fieldsEqual(fields, baseline)) {
+      localStorage.removeItem(draftKey);
+      $('#draft-saved', wrap).hidden = true;
+      return;
+    }
+    localStorage.setItem(draftKey, JSON.stringify({
+      savedAt: Date.now(),
+      fields,
+      meta: opts.draft,
+      title,
+    }));
+    $('#draft-saved', wrap).hidden = false;
+  }
+
+  const restored = draftKey ? readDraft(draftKey) : null;
+  if (restored?.fields) {
+    applyFields(modal, restored.fields);
+    const banner = $('#draft-banner', wrap);
+    banner.hidden = false;
+    banner.innerHTML = `已恢復上次未完成的草稿 <button type="button" class="ghost" id="draft-discard">捨棄草稿</button>`;
+    $('#draft-discard', banner).addEventListener('click', () => {
+      localStorage.removeItem(draftKey);
+      applyFields(modal, baseline);
+      banner.hidden = true;
+      $('#draft-saved', wrap).hidden = true;
+    });
+  }
+
+  const schedule = () => {
+    clearTimeout(timer);
+    timer = setTimeout(flush, 500);
+  };
+  modal.addEventListener('input', schedule);
+  modal.addEventListener('change', schedule);
+
+  const close = () => {
+    clearTimeout(timer);
+    wrap.remove();
+  };
+  function requestClose() {
+    if (!draftKey) {
+      close();
+      return;
+    }
+    clearTimeout(timer);
+    flush();
+    if (fieldsEqual(collectFields(modal), baseline)) {
+      localStorage.removeItem(draftKey);
+      close();
+      return;
+    }
+    $('#draft-ask', wrap).hidden = false;
+  }
+  wrap.addEventListener('click', (e) => { if (e.target === wrap) requestClose(); });
+  $('[data-cancel]', wrap).addEventListener('click', requestClose);
+  $('[data-draft-keep]', wrap).addEventListener('click', () => { flush(); close(); });
+  $('[data-draft-drop]', wrap).addEventListener('click', () => {
+    localStorage.removeItem(draftKey);
+    close();
+  });
   $('[data-ok]', wrap).addEventListener('click', async () => {
     try {
       await onSubmit(wrap);
+      if (draftKey) localStorage.removeItem(draftKey);
       close();
     } catch (err) {
       toast(err.message || '失敗');
     }
   });
   return wrap;
+}
+
+function reopenLatestDraft() {
+  const [latest] = listTripDrafts();
+  if (!latest?.meta) return;
+  const { type, id, day } = latest.meta;
+  const trip = state.trip;
+  if (!trip) return;
+  if (type === 'activity') {
+    const activity = id && id !== 'new' ? (trip.days?.[day] || []).find((a) => a.id === id) : null;
+    openActivityModal(day, activity || null);
+  } else if (type === 'food') {
+    const item = id && id !== 'new' ? (trip.restaurants || []).find((r) => r.id === id) : null;
+    openFoodModal({ date: day, item: item || null });
+  } else if (type === 'stay') {
+    const item = id && id !== 'new' ? (trip.lodgings || []).find((l) => l.id === id) : null;
+    openStayModal(item ? { item } : { defaults: { checkIn: day, checkOut: day ? shiftDate(day, 1) : '' } });
+  } else if (type === 'ride') {
+    const item = id && id !== 'new' ? (trip.transports || []).find((t) => t.id === id) : null;
+    openRideModal({ date: day, item: item || null });
+  } else if (type === 'expense') openExpenseModal();
+  else if (type === 'country') openCountryModal();
+  else if (type === 'stay-setup') {
+    const country = (trip.countries || []).find((c) => c.id === id) || (trip.countries || [])[0];
+    if (country) openLodgingSetup(country);
+  } else if (type === 'import') openImportSheet();
+}
+
+function notifyDrafts() {
+  const drafts = listTripDrafts();
+  if (!drafts.length || document.querySelector('.draft-notice')) return;
+  const note = document.createElement('button');
+  note.type = 'button';
+  note.className = 'toast draft-notice';
+  note.textContent = `你有 ${drafts.length} 筆未完成的草稿`;
+  note.addEventListener('click', () => {
+    note.remove();
+    reopenLatestDraft();
+  });
+  document.body.appendChild(note);
+  setTimeout(() => note.remove(), 8000);
 }
 
 function openBranchSheet({ kind, entry, candidates }) {
@@ -1107,7 +1295,7 @@ function openCountryModal() {
     const countries = (state.trip.countries || []).concat([country]);
     await saveTrip({ countries });
     openLodgingSetup(country);
-  });
+  }, { draft: { type: 'country', id: 'new', day: '' } });
 }
 
 function readStayFields(wrap) {
@@ -1165,7 +1353,7 @@ function openStayModal({ item, defaults } = {}) {
       lodgings = (state.trip.lodgings || []).concat([{ id: uid(), ...fields }]);
     }
     await saveTrip({ lodgings });
-  });
+  }, { draft: { type: 'stay', id: item?.id || 'new', day: calendarDate(value.checkIn) || '' } });
 }
 
 function openLodgingSetup(country) {
@@ -1182,7 +1370,7 @@ function openLodgingSetup(country) {
     const lodgings = (state.trip.lodgings || []).concat(all.map((fields) => ({ id: uid(), ...fields })));
     await saveTrip({ lodgings });
     toast(all.length > 1 ? `已加入 ${all.length} 間住宿` : '已加入住宿');
-  }, { cancelLabel: '略過', okLabel: '完成' });
+  }, { cancelLabel: '略過', okLabel: '完成', draft: { type: 'stay-setup', id: country.id || country.name, day: country.start || '' } });
   $('#stay-add-more', wrap).addEventListener('click', () => {
     try {
       const current = readStayFields(wrap);
@@ -1229,7 +1417,7 @@ function openActivityModal(date, activity) {
     }
     days[date] = list;
     await saveTrip({ days });
-  });
+  }, { draft: { type: 'activity', id: activity?.id || 'new', day: date || '' } });
 }
 
 function openFoodModal({ date, item } = {}) {
@@ -1272,7 +1460,7 @@ function openFoodModal({ date, item } = {}) {
       restaurants = (state.trip.restaurants || []).map((r) => r.id === item.id ? next : r);
     } else restaurants = (state.trip.restaurants || []).concat([{ id: uid(), ...fields }]);
     await saveTrip({ restaurants });
-  });
+  }, { draft: { type: 'food', id: item?.id || 'new', day: item?.date || date || '' } });
 }
 
 function textPlace(value) {
@@ -1389,7 +1577,7 @@ function openRideModal({ date, item } = {}) {
     if (item) transports = (state.trip.transports || []).map((r) => r.id === item.id ? { ...r, ...fields, id: r.id } : r);
     else transports = (state.trip.transports || []).concat([{ id: uid(), ...fields }]);
     await saveTrip({ transports });
-  });
+  }, { draft: { type: 'ride', id: item?.id || 'new', day: date || item?.date || '' } });
 }
 
 function openExpenseModal() {
@@ -1422,13 +1610,14 @@ function openExpenseModal() {
       id: uid(), desc, amount, currency, payerId, shared, splitWith, createdAt: new Date().toISOString(),
     }]);
     await saveTrip({ expenses });
-  });
+  }, { draft: { type: 'expense', id: 'new', day: '' } });
   const backdrop = $$('.modal-backdrop').at(-1);
   const shared = $('#e-shared', backdrop);
   const splitWrap = $('#e-split-wrap', backdrop);
   shared.addEventListener('change', () => {
     splitWrap.style.display = shared.checked ? '' : 'none';
   });
+  shared.dispatchEvent(new Event('change'));
 }
 
 function maybeWelcomeTheme() {
@@ -1713,9 +1902,79 @@ function openImportSheet() {
     renderFileList();
     const text = $('#import-text', wrap);
     if (text) text.value = pasted;
+    const importDraftKey = draftStorageKey({ type: 'import', id: 'text', day: '' });
+    const savedImport = readDraft(importDraftKey);
+    if (text && !text.value && savedImport?.fields?.['import-text']) {
+      text.value = savedImport.fields['import-text'];
+      pasted = text.value;
+      const banner = document.createElement('div');
+      banner.className = 'draft-banner';
+      banner.innerHTML = `已恢復上次未完成的草稿 <button type="button" class="ghost" id="import-draft-discard">捨棄草稿</button>`;
+      text.before(banner);
+      $('#import-draft-discard', banner).addEventListener('click', () => {
+        localStorage.removeItem(importDraftKey);
+        text.value = '';
+        pasted = '';
+        banner.remove();
+        const mark = $('#import-draft-saved', wrap);
+        if (mark) mark.hidden = true;
+      });
+    }
+    if (text) {
+      const mark = document.createElement('div');
+      mark.id = 'import-draft-saved';
+      mark.className = 'draft-saved';
+      mark.hidden = true;
+      mark.textContent = '草稿已暫存';
+      text.after(mark);
+      let importTimer = null;
+      text.addEventListener('input', () => {
+        pasted = text.value;
+        clearTimeout(importTimer);
+        importTimer = setTimeout(() => {
+          if (!text.value.trim()) {
+            localStorage.removeItem(importDraftKey);
+            mark.hidden = true;
+            return;
+          }
+          localStorage.setItem(importDraftKey, JSON.stringify({
+            savedAt: Date.now(),
+            fields: { 'import-text': text.value },
+            meta: { type: 'import', id: 'text', day: '' },
+            title: '匯入行程',
+          }));
+          mark.hidden = false;
+        }, 500);
+      });
+    }
     syncOwnNote();
     $('#import-key-save', wrap)?.addEventListener('change', syncOwnNote);
-    $('#import-cancel', wrap).addEventListener('click', close);
+    $('#import-cancel', wrap).addEventListener('click', () => {
+      const value = text?.value || '';
+      if (!value.trim()) {
+        localStorage.removeItem(importDraftKey);
+        close();
+        return;
+      }
+      localStorage.setItem(importDraftKey, JSON.stringify({
+        savedAt: Date.now(),
+        fields: { 'import-text': value },
+        meta: { type: 'import', id: 'text', day: '' },
+        title: '匯入行程',
+      }));
+      let ask = $('#import-draft-ask', wrap);
+      if (ask) { ask.hidden = false; return; }
+      ask = document.createElement('div');
+      ask.id = 'import-draft-ask';
+      ask.className = 'draft-ask';
+      ask.innerHTML = `<div>要保留草稿嗎？</div><div class="actions"><button type="button" class="secondary" data-import-keep>保留</button><button type="button" data-import-drop>捨棄</button></div>`;
+      $('#import-body', wrap).appendChild(ask);
+      $('[data-import-keep]', ask).addEventListener('click', close);
+      $('[data-import-drop]', ask).addEventListener('click', () => {
+        localStorage.removeItem(importDraftKey);
+        close();
+      });
+    });
     $('#import-key', wrap).addEventListener('input', syncOwnNote);
     $('#import-key-clear', wrap).addEventListener('click', () => {
       localStorage.removeItem('tp_openai_key');
@@ -1803,6 +2062,7 @@ function openImportSheet() {
       }
       const data = await api(`/api/trips/${state.trip.id}/import`, { method: 'POST', body: JSON.stringify(payload) });
       if (closed) return;
+      clearDraft({ type: 'import', id: 'text', day: '' });
       showReview(data.extraction, data.mock);
     } catch (err) {
       if (go) go.disabled = false;
