@@ -224,6 +224,16 @@ label { display: block; font-size: 0.85rem; color: var(--muted); margin: 0.6rem 
   background: var(--accent-soft); color: var(--accent);
 }
 .block-food .map-link { background: #ffedd5; color: var(--food-ink); }
+.reviews-link {
+  display: inline-block; margin-top: 0.35rem; font-size: 0.82rem; font-weight: 700;
+  color: var(--food-ink); text-decoration: none;
+}
+.place-reviews { margin-top: 0.35rem; font-size: 0.82rem; }
+.place-rating { font-weight: 700; color: var(--food-ink); }
+.place-snippets { margin: 0.2rem 0 0; padding-left: 1rem; }
+.place-snippets li { margin: 0.15rem 0; }
+.places-attr { margin-top: 0.25rem; font-size: 0.72rem; color: var(--muted); }
+.places-attr a { color: var(--muted); font-weight: 700; text-decoration: none; }
 .block-stay .map-link { background: #e0e7ff; color: var(--stay-ink); }
 .block-ride .map-link { background: #e0f2fe; color: var(--ride-ink); }
 .item-actions { display: flex; flex: none; gap: 0; }

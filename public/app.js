@@ -50,6 +50,9 @@ const state = {
   pollTimer: null,
   lastSync: 0,
   themeOffered: false,
+  placesEnabled: null,
+  placesStatusPending: false,
+  placeReviews: {},
 };
 
 const $ = (sel, el = document) => el.querySelector(sel);
@@ -216,6 +219,72 @@ function placeHtml(place) {
   if (!p) return '';
   const label = /^https?:\/\//i.test(p) ? '地圖連結' : escapeHtml(p);
   return `<div class="place-line"><a href="${escapeHtml(mapHref(p))}" target="_blank" rel="noopener noreferrer">${label}<span class="map-link">地圖</span></a></div>`;
+}
+
+function countryForDate(trip, date) {
+  const list = trip?.countries || [];
+  if (!date) return list[0] || null;
+  return list.find((c) => c.start && c.end && date >= c.start && date <= c.end) || null;
+}
+
+function restaurantSearchQuery(restaurant, trip) {
+  const parts = [];
+  const name = String(restaurant?.name || '').trim();
+  if (name) parts.push(name);
+  const place = String(restaurant?.place || '').trim();
+  if (place && !/^https?:\/\//i.test(place)) parts.push(place);
+  const country = countryForDate(trip, restaurant?.date);
+  if (country?.name && !parts.join(' ').includes(country.name)) parts.push(country.name);
+  return parts.join(' ').slice(0, 200);
+}
+
+function mapsSearchUrl(query) {
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
+}
+
+function placeReviewsHtml(query) {
+  const data = state.placeReviews[query];
+  if (!data || data.loading || data.enabled === false || data.error) return '';
+  const reviews = (data.reviews || []).slice(0, 3).filter((rev) => rev.text);
+  if (data.rating == null && !reviews.length) return '';
+  const stars = data.rating != null ? `★ ${Number(data.rating).toFixed(1)}` : '';
+  const count = Number.isFinite(Number(data.userRatingCount)) ? `${Number(data.userRatingCount).toLocaleString('zh-TW')} 則評價` : '';
+  const attrHref = data.googleMapsUri || mapsSearchUrl(query);
+  return `
+    <div class="place-reviews">
+      ${stars || count ? `<div class="place-rating">${stars}${stars && count ? ' · ' : ''}${count}</div>` : ''}
+      ${reviews.length ? `<ul class="place-snippets">${reviews.map((rev) => `<li>${escapeHtml(rev.text)}${rev.author ? `<span class="muted"> — ${escapeHtml(rev.author)}</span>` : ''}</li>`).join('')}</ul>` : ''}
+      <div class="places-attr">評價資料來自 <a href="${escapeHtml(attrHref)}" target="_blank" rel="noopener noreferrer">Google</a></div>
+    </div>
+  `;
+}
+
+function ensurePlaceReviews(queries) {
+  const unique = [...new Set((queries || []).filter(Boolean))];
+  if (state.placesEnabled === false) return;
+  if (state.placesEnabled == null) {
+    if (state.placesStatusPending) return;
+    state.placesStatusPending = true;
+    api('/api/places/status').then((s) => {
+      state.placesEnabled = !!s.enabled;
+      state.placesStatusPending = false;
+      if (state.placesEnabled) ensurePlaceReviews(unique);
+    }).catch(() => {
+      state.placesEnabled = false;
+      state.placesStatusPending = false;
+    });
+    return;
+  }
+  for (const query of unique) {
+    if (state.placeReviews[query]) continue;
+    state.placeReviews[query] = { loading: true };
+    api(`/api/places/reviews?q=${encodeURIComponent(query)}`).then((data) => {
+      state.placeReviews[query] = data;
+      if (state.tab === 'timeline' && state.placesEnabled) render();
+    }).catch(() => {
+      state.placeReviews[query] = { enabled: true, error: true };
+    });
+  }
 }
 
 function normalizeTrip(trip) {
@@ -445,6 +514,7 @@ function renderTimeline() {
   const days = buildTimelineDays();
   const prefs = blockPrefs();
   const counts = blockCounts(trip);
+  const reviewQueries = [];
   el.innerHTML = `
     <div class="card">
       <div class="row" style="align-items:flex-start">
@@ -520,7 +590,11 @@ function renderTimeline() {
             <div class="day-blocks ${prefs.food || prefs.stay || prefs.ride ? '' : 'hidden'}">
               <section class="block block-food ${prefs.food ? '' : 'hidden'}">
                 <div class="block-head">${ICON_FOOD}<h3 class="block-title">餐廳</h3><button class="secondary slim" type="button" data-add-food="${date}">新增</button></div>
-                ${foods.map((r) => `
+                ${foods.map((r) => {
+                  const query = restaurantSearchQuery(r, trip);
+                  if (query) reviewQueries.push(query);
+                  const reviewsHref = mapsSearchUrl(query || r.name || '');
+                  return `
                   <div class="block-card">
                     <div class="block-card-top">
                       <div><strong>${escapeHtml(r.name || '（未命名）')}</strong><span class="pill">${escapeHtml(r.meal || '其他')}</span>${r.time ? `<div class="muted">${escapeHtml(r.time)}</div>` : ''}</div>
@@ -531,8 +605,11 @@ function renderTimeline() {
                     </div>
                     ${placeHtml(r.place)}
                     ${r.note ? `<div class="muted note-line">${escapeHtml(r.note)}</div>` : ''}
+                    ${placeReviewsHtml(query)}
+                    <a class="reviews-link" href="${escapeHtml(reviewsHref)}" target="_blank" rel="noopener noreferrer">看 Google 評價</a>
                   </div>
-                `).join('') || '<div class="empty-line">尚無餐廳</div>'}
+                `;
+                }).join('') || '<div class="empty-line">尚無餐廳</div>'}
               </section>
               <section class="block block-stay ${prefs.stay ? '' : 'hidden'}">
                 <div class="block-head">${ICON_STAY}<h3 class="block-title">住宿</h3><button class="secondary slim" type="button" data-add-stay="${date}">新增</button></div>
@@ -577,6 +654,7 @@ function renderTimeline() {
       }).join('') : '<div class="muted">請先為國家設定日期區間</div>'}
     </div>
   `;
+  ensurePlaceReviews(reviewQueries);
   $$('[data-toggle-block]', el).forEach((btn) => btn.addEventListener('click', () => {
     const prefsNow = blockPrefs();
     const key = btn.dataset.toggleBlock;

@@ -8,6 +8,7 @@ const PORT = process.env.PORT || 3000;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'trips.json');
 const RATES_FILE = path.join(DATA_DIR, 'rates.json');
+const PLACES_FILE = path.join(DATA_DIR, 'places-cache.json');
 
 const SUPPORTED_CURRENCIES = ['EUR', 'CHF', 'JPY', 'TWD', 'CNY', 'HKD', 'AUD', 'NZD', 'KRW'];
 const RATE_CACHE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
@@ -538,6 +539,82 @@ app.post('/api/trips/:tripId/import', async (req, res) => {
     return res.status(502).json({ error: '辨識結果無法讀取，請再試一次。' });
   }
   res.json({ extraction: cleanExtraction(parsed), mock: false, model });
+});
+
+const PLACES_CACHE_MS = 7 * 24 * 60 * 60 * 1000;
+
+function placesApiKey() {
+  return String(process.env.GOOGLE_PLACES_API_KEY || '').trim();
+}
+
+function readPlacesCache() {
+  try {
+    return JSON.parse(fs.readFileSync(PLACES_FILE, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+function writePlacesCache(cache) {
+  ensureData();
+  fs.writeFileSync(PLACES_FILE, JSON.stringify(cache));
+}
+
+function placeSnippet(review) {
+  const text = String(review?.text?.text || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+  if (!text) return null;
+  return {
+    text,
+    rating: typeof review.rating === 'number' ? review.rating : null,
+    author: String(review.authorAttribution?.displayName || '').slice(0, 40),
+  };
+}
+
+app.get('/api/places/status', (_req, res) => {
+  res.json({ enabled: Boolean(placesApiKey()) });
+});
+
+app.get('/api/places/reviews', async (req, res) => {
+  const key = placesApiKey();
+  if (!key) return res.json({ enabled: false });
+  const query = String(req.query.q || '').trim().replace(/\s+/g, ' ').slice(0, 200);
+  if (!query) return res.status(400).json({ enabled: true, error: '缺少餐廳名稱' });
+  const cacheId = query.toLowerCase();
+  const cache = readPlacesCache();
+  const hit = cache[cacheId];
+  if (hit?.fetchedAt && Date.now() - new Date(hit.fetchedAt).getTime() < PLACES_CACHE_MS && hit.payload) {
+    return res.json({ enabled: true, cached: true, ...hit.payload });
+  }
+  try {
+    const upstream = await fetch('https://places.googleapis.com/v1/places:searchText', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': key,
+        'X-Goog-FieldMask': 'places.rating,places.userRatingCount,places.googleMapsUri,places.reviews',
+      },
+      body: JSON.stringify({ textQuery: query, maxResultCount: 1, languageCode: 'zh-TW' }),
+      signal: AbortSignal.timeout(15000),
+    });
+    const data = await upstream.json().catch(() => ({}));
+    if (!upstream.ok) {
+      console.error('places search', upstream.status);
+      return res.status(502).json({ enabled: true, error: true });
+    }
+    const place = (data.places || [])[0];
+    const payload = place ? {
+      rating: typeof place.rating === 'number' ? place.rating : null,
+      userRatingCount: typeof place.userRatingCount === 'number' ? place.userRatingCount : null,
+      googleMapsUri: typeof place.googleMapsUri === 'string' ? place.googleMapsUri : '',
+      reviews: (place.reviews || []).slice(0, 3).map(placeSnippet).filter(Boolean),
+    } : { rating: null, userRatingCount: null, googleMapsUri: '', reviews: [] };
+    cache[cacheId] = { fetchedAt: new Date().toISOString(), payload };
+    writePlacesCache(cache);
+    res.json({ enabled: true, cached: false, ...payload });
+  } catch (err) {
+    console.error('places search failed', err?.name || 'error');
+    res.status(502).json({ enabled: true, error: true });
+  }
 });
 
 app.use((err, req, res, next) => {
