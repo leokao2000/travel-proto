@@ -160,21 +160,36 @@ function toTwd(amount, currency, rates) {
   return Number(amount) * r;
 }
 
-function offsetLabel(tz) {
+function calendarDate(value) {
+  const match = String(value || '').trim().match(/^(\d{4}-\d{2}-\d{2})/);
+  return match ? match[1] : '';
+}
+
+function formatUtcOffset(raw) {
+  const text = String(raw || '').trim();
+  if (/^(GMT|UTC)$/i.test(text)) return 'UTC+0';
+  const match = text.match(/(?:GMT|UTC)\s*([+-])\s*(\d{1,2})(?::?(\d{2}))?/i);
+  if (!match) return text.replace(/^GMT/i, 'UTC');
+  const minutes = match[3] && Number(match[3]) ? `:${match[3]}` : '';
+  return `UTC${match[1]}${Number(match[2])}${minutes}`;
+}
+
+function offsetLabel(tz, dateStr) {
   try {
-    const parts = new Intl.DateTimeFormat('en-US', { timeZone: tz, timeZoneName: 'shortOffset' }).formatToParts(new Date());
-    return parts.find((p) => p.type === 'timeZoneName')?.value || tz;
+    const day = calendarDate(dateStr);
+    const instant = day ? new Date(`${day}T12:00:00Z`) : new Date();
+    const parts = new Intl.DateTimeFormat('en-US', { timeZone: tz, timeZoneName: 'shortOffset' }).formatToParts(instant);
+    const raw = parts.find((p) => p.type === 'timeZoneName')?.value || '';
+    return formatUtcOffset(raw) || tz;
   } catch {
     return tz;
   }
 }
 
-function localTime(tz) {
-  try {
-    return new Intl.DateTimeFormat('zh-TW', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date());
-  } catch {
-    return '--:--';
-  }
+function offsetForStay(tz, start, end) {
+  const from = offsetLabel(tz, start);
+  const to = end ? offsetLabel(tz, end) : from;
+  return from === to ? from : `${from}–${to}`;
 }
 
 function shiftDate(dateStr, days) {
@@ -223,8 +238,13 @@ function placeHtml(place) {
 
 function countryForDate(trip, date) {
   const list = trip?.countries || [];
-  if (!date) return list[0] || null;
-  return list.find((c) => c.start && c.end && date >= c.start && date <= c.end) || null;
+  const day = calendarDate(date);
+  if (!day) return list[0] || null;
+  return list.find((c) => {
+    const start = calendarDate(c.start);
+    const end = calendarDate(c.end);
+    return start && end && day >= start && day <= end;
+  }) || null;
 }
 
 function placeSearchQuery(entry, trip, date) {
@@ -529,15 +549,29 @@ function computeSettlement() {
   return { lines, totalsByMember: bal, groupTotalTwd };
 }
 
+function countriesOnDate(trip, date) {
+  const day = calendarDate(date);
+  if (!day) return [];
+  return (trip.countries || []).filter((c) => {
+    const start = calendarDate(c.start);
+    const end = calendarDate(c.end);
+    return start && end && day >= start && day <= end;
+  });
+}
+
 function buildTimelineDays() {
   const trip = state.trip;
   const map = new Map();
-  for (const c of trip.countries || []) {
-    if (!c.start || !c.end) continue;
-    for (const d of eachDate(c.start, c.end)) {
-      if (!map.has(d)) map.set(d, []);
-      map.get(d).push(c);
-    }
+  const ensure = (date) => {
+    const day = calendarDate(date);
+    if (!day) return;
+    if (!map.has(day)) map.set(day, countriesOnDate(trip, day));
+  };
+  for (const country of trip.countries || []) {
+    for (const day of eachDate(calendarDate(country.start), calendarDate(country.end))) ensure(day);
+  }
+  for (const lodging of trip.lodgings || []) {
+    for (const day of eachDate(calendarDate(lodging.checkIn), calendarDate(lodging.checkOut))) ensure(day);
   }
   return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]));
 }
@@ -558,14 +592,23 @@ function activityName(a) {
 }
 
 function stayStatus(lodging, date) {
-  if (date === lodging.checkIn && date === lodging.checkOut) return '當日';
-  if (date === lodging.checkIn) return '入住';
-  if (date === lodging.checkOut) return '退房';
+  const day = calendarDate(date);
+  const start = calendarDate(lodging.checkIn);
+  const end = calendarDate(lodging.checkOut);
+  if (day && start && day === start && day === end) return '當日';
+  if (day && start && day === start) return '入住';
+  if (day && end && day === end) return '退房';
   return '住宿中';
 }
 
 function lodgingOn(date) {
-  return (state.trip.lodgings || []).filter((l) => l.checkIn && l.checkOut && date >= l.checkIn && date <= l.checkOut);
+  const day = calendarDate(date);
+  if (!day) return [];
+  return (state.trip.lodgings || []).filter((l) => {
+    const start = calendarDate(l.checkIn);
+    const end = calendarDate(l.checkOut);
+    return start && end && end >= start && day >= start && day <= end;
+  });
 }
 
 function blockPrefs() {
@@ -638,7 +681,7 @@ function renderTimeline() {
                 <button class="ghost" data-remove-country="${idx}" type="button">移除</button>
               </span>
             </div>
-            <div class="muted">${escapeHtml(c.tz)} · ${offsetLabel(c.tz)} · 現在 ${localTime(c.tz)}</div>
+            <div class="muted">${escapeHtml(c.tz)} · ${escapeHtml(offsetForStay(c.tz, c.start, c.end))}</div>
             <div class="muted">${c.start || '?'} → ${c.end || '?'} · 幣別 ${c.currency || '—'}</div>
           </div>
         </div>
@@ -663,7 +706,7 @@ function renderTimeline() {
             <div class="day-head">
               <div>
                 <strong>${date}（週${weekday(date)}）</strong>
-                <div>${countries.map((c) => `<span class="chip">${countrySvg(c.code, 'sm')}${escapeHtml(c.name)} ${localTime(c.tz)}</span>`).join(' ')}</div>
+                <div>${countries.map((c) => `<span class="chip">${countrySvg(c.code, 'sm')}${escapeHtml(c.name)} ${escapeHtml(offsetLabel(c.tz, date))}</span>`).join(' ')}</div>
               </div>
               <button class="ghost ${prefs.activity ? '' : 'hidden'}" data-add-act="${date}" type="button">+ 活動</button>
             </div>
@@ -716,7 +759,7 @@ function renderTimeline() {
                     <div class="block-card-top">
                       <div>
                         <strong>${escapeHtml(l.name || '（未命名）')}</strong><span class="pill">${stayStatus(l, date)}</span>
-                        <div class="muted">${escapeHtml(l.checkIn)} → ${escapeHtml(l.checkOut)}${l.countryName ? ` · ${escapeHtml(l.countryName)}` : ''}</div>
+                        <div class="muted">${escapeHtml(calendarDate(l.checkIn) || l.checkIn)} → ${escapeHtml(calendarDate(l.checkOut) || l.checkOut)}${l.countryName ? ` · ${escapeHtml(l.countryName)}` : ''}</div>
                       </div>
                       <div class="item-actions">
                         <button class="ghost" type="button" data-edit-stay="${l.id}">改</button>
@@ -1091,9 +1134,9 @@ function stayFormHtml(value = {}) {
     <label>住宿名稱</label>
     <input id="stay-name" maxlength="80" placeholder="例如：淺草飯店" value="${escapeHtml(value.name || '')}" />
     <label>入住</label>
-    <input type="date" id="stay-in" value="${escapeHtml(value.checkIn || '')}" />
+    <input type="date" id="stay-in" value="${escapeHtml(calendarDate(value.checkIn) || '')}" />
     <label>退房</label>
-    <input type="date" id="stay-out" value="${escapeHtml(value.checkOut || '')}" />
+    <input type="date" id="stay-out" value="${escapeHtml(calendarDate(value.checkOut) || '')}" />
     <label>地點（用來搜尋）</label>
     <input id="stay-place" maxlength="200" placeholder="城市或區域，例如：東京淺草" value="${escapeHtml(value.place || '')}" />
     <label>地址</label>
@@ -1239,10 +1282,13 @@ function textPlace(value) {
 }
 
 function nightLodging(date) {
+  const day = calendarDate(date);
   const stays = (state.trip?.lodgings || []).filter((l) => {
-    if (!l.checkIn || !l.checkOut || l.checkOut < l.checkIn) return false;
-    if (l.checkIn === l.checkOut) return l.checkIn === date;
-    return date >= l.checkIn && date < l.checkOut;
+    const start = calendarDate(l.checkIn);
+    const end = calendarDate(l.checkOut);
+    if (!day || !start || !end || end < start) return false;
+    if (start === end) return start === day;
+    return day >= start && day < end;
   });
   stays.sort((a, b) => a.checkIn.localeCompare(b.checkIn) || String(a.name || '').localeCompare(String(b.name || '')));
   return stays[stays.length - 1] || null;
