@@ -289,6 +289,41 @@ function keptPlaceId(item, fields) {
   return item.placeId;
 }
 
+function telHref(phone) {
+  const dial = String(phone || '').replace(/[^\d+]/g, '');
+  return dial ? `tel:${dial}` : '';
+}
+
+function contactHtml(entry) {
+  const address = String(entry?.address || '').trim();
+  const phone = String(entry?.phone || '').trim();
+  const mapsUrl = String(entry?.mapsUrl || '').trim();
+  const addressHref = mapsUrl || (address ? mapsSearchUrl(address) : '');
+  const phoneHref = telHref(phone);
+  return `
+    ${address && addressHref ? `<div class="place-line"><a href="${escapeHtml(addressHref)}" target="_blank" rel="noopener noreferrer">${escapeHtml(address)}<span class="map-link">地圖</span></a></div>` : ''}
+    ${!address && mapsUrl ? `<div class="place-line"><a href="${escapeHtml(mapsUrl)}" target="_blank" rel="noopener noreferrer">Google 地圖</a></div>` : ''}
+    ${phone ? `<div class="place-line">${phoneHref ? `<a href="${escapeHtml(phoneHref)}">${escapeHtml(phone)}</a>` : escapeHtml(phone)}</div>` : ''}
+  `;
+}
+
+function contactFromCandidate(place) {
+  return {
+    placeId: place.id,
+    address: String(place.address || '').trim().slice(0, 200),
+    phone: String(place.phone || '').trim().slice(0, 40),
+    mapsUrl: String(place.googleMapsUri || '').trim().slice(0, 500),
+  };
+}
+
+function blankContactPatch(entry, place) {
+  const patch = {};
+  if (!String(entry.address || '').trim() && place.address) patch.address = String(place.address).trim().slice(0, 200);
+  if (!String(entry.phone || '').trim() && place.phone) patch.phone = String(place.phone).trim().slice(0, 40);
+  if (!String(entry.mapsUrl || '').trim() && place.googleMapsUri) patch.mapsUrl = String(place.googleMapsUri).trim().slice(0, 500);
+  return patch;
+}
+
 function ensurePlaceReviews(queries) {
   const unique = [...new Set((queries || []).filter(Boolean))];
   if (state.placesEnabled === false) return;
@@ -315,6 +350,34 @@ function ensurePlaceReviews(queries) {
       state.placeReviews[query] = { enabled: true, error: true };
     });
   }
+}
+
+function applySingleCandidateContact(entries) {
+  if (!state.placesEnabled || !state.trip) return;
+  const food = new Map();
+  const stay = new Map();
+  for (const item of entries || []) {
+    const match = chosenPlaceCandidate(item.entry, item.query);
+    if (!match || match.candidates.length !== 1 || !match.chosen) continue;
+    const patch = blankContactPatch(item.entry, match.chosen);
+    if (!Object.keys(patch).length) continue;
+    const bucket = item.kind === 'stay' ? stay : food;
+    if (!bucket.has(item.entry.id)) bucket.set(item.entry.id, patch);
+  }
+  if (!food.size && !stay.size) return;
+  const token = [...food.keys(), ...stay.keys()].sort().join('|');
+  if (state.contactFillToken === token) return;
+  state.contactFillToken = token;
+  const body = {};
+  if (food.size) {
+    body.restaurants = (state.trip.restaurants || []).map((r) => food.has(r.id) ? { ...r, ...food.get(r.id) } : r);
+  }
+  if (stay.size) {
+    body.lodgings = (state.trip.lodgings || []).map((l) => stay.has(l.id) ? { ...l, ...stay.get(l.id) } : l);
+  }
+  saveTrip(body).finally(() => {
+    if (state.contactFillToken === token) state.contactFillToken = '';
+  });
 }
 
 function normalizeTrip(trip) {
@@ -545,6 +608,7 @@ function renderTimeline() {
   const prefs = blockPrefs();
   const counts = blockCounts(trip);
   const reviewQueries = [];
+  const reviewEntries = [];
   el.innerHTML = `
     <div class="card">
       <div class="row" style="align-items:flex-start">
@@ -623,6 +687,7 @@ function renderTimeline() {
                 ${foods.map((r) => {
                   const query = restaurantSearchQuery(r, trip);
                   if (query) reviewQueries.push(query);
+                  reviewEntries.push({ kind: 'food', entry: r, query });
                   return `
                   <div class="block-card">
                     <div class="block-card-top">
@@ -633,6 +698,7 @@ function renderTimeline() {
                       </div>
                     </div>
                     ${placeHtml(r.place)}
+                    ${contactHtml(r)}
                     ${r.note ? `<div class="muted note-line">${escapeHtml(r.note)}</div>` : ''}
                     ${placesCardHtml(r, query, 'food')}
                   </div>
@@ -644,6 +710,7 @@ function renderTimeline() {
                 ${stays.map((l) => {
                   const query = placeSearchQuery(l, trip, l.checkIn);
                   if (query) reviewQueries.push(query);
+                  reviewEntries.push({ kind: 'stay', entry: l, query });
                   return `
                   <div class="block-card">
                     <div class="block-card-top">
@@ -657,6 +724,7 @@ function renderTimeline() {
                       </div>
                     </div>
                     ${placeHtml(l.place)}
+                    ${contactHtml(l)}
                     ${l.note ? `<div class="muted note-line">${escapeHtml(l.note)}</div>` : ''}
                     ${placesCardHtml(l, query, 'stay')}
                   </div>
@@ -688,6 +756,7 @@ function renderTimeline() {
     </div>
   `;
   ensurePlaceReviews(reviewQueries);
+  applySingleCandidateContact(reviewEntries);
   $$('[data-pick-branch]', el).forEach((btn) => btn.addEventListener('click', () => {
     const kind = btn.dataset.branchKind;
     const entry = kind === 'stay'
@@ -962,11 +1031,12 @@ function openBranchSheet({ kind, entry, candidates }) {
     if (!place?.id) return;
     btn.disabled = true;
     try {
+      const filled = contactFromCandidate(place);
       if (kind === 'stay') {
-        const lodgings = (state.trip.lodgings || []).map((l) => l.id === entry.id ? { ...l, placeId: place.id } : l);
+        const lodgings = (state.trip.lodgings || []).map((l) => l.id === entry.id ? { ...l, ...filled } : l);
         await saveTrip({ lodgings });
       } else {
-        const restaurants = (state.trip.restaurants || []).map((r) => r.id === entry.id ? { ...r, placeId: place.id } : r);
+        const restaurants = (state.trip.restaurants || []).map((r) => r.id === entry.id ? { ...r, ...filled } : r);
         await saveTrip({ restaurants });
       }
       close();
@@ -1008,6 +1078,9 @@ function readStayFields(wrap) {
     checkIn,
     checkOut,
     place: $('#stay-place', wrap).value.trim().slice(0, 200),
+    address: $('#stay-address', wrap).value.trim().slice(0, 200),
+    phone: $('#stay-phone', wrap).value.trim().slice(0, 40),
+    mapsUrl: $('#stay-maps', wrap).value.trim().slice(0, 500),
     note: $('#stay-note', wrap).value.trim().slice(0, 200),
     countryName: ($('#stay-country', wrap)?.value || '').slice(0, 40),
   };
@@ -1021,8 +1094,14 @@ function stayFormHtml(value = {}) {
     <input type="date" id="stay-in" value="${escapeHtml(value.checkIn || '')}" />
     <label>退房</label>
     <input type="date" id="stay-out" value="${escapeHtml(value.checkOut || '')}" />
-    <label>地址或地圖連結</label>
-    <input id="stay-place" maxlength="200" placeholder="地址，或貼上地圖連結" value="${escapeHtml(value.place || '')}" />
+    <label>地點（用來搜尋）</label>
+    <input id="stay-place" maxlength="200" placeholder="城市或區域，例如：東京淺草" value="${escapeHtml(value.place || '')}" />
+    <label>地址</label>
+    <input id="stay-address" maxlength="200" placeholder="可留空，選定分店後會自動帶入" value="${escapeHtml(value.address || '')}" />
+    <label>電話</label>
+    <input id="stay-phone" type="tel" maxlength="40" placeholder="可留空，選定分店後會自動帶入" value="${escapeHtml(value.phone || '')}" />
+    <label>Google 地圖連結</label>
+    <input id="stay-maps" maxlength="500" placeholder="可留空，選定分店後會自動帶入" value="${escapeHtml(value.mapsUrl || '')}" />
     <label>訂房／確認碼備註</label>
     <input id="stay-note" maxlength="200" placeholder="確認碼、房型…" value="${escapeHtml(value.note || '')}" />
     <input type="hidden" id="stay-country" value="${escapeHtml(value.countryName || '')}" />
@@ -1071,6 +1150,9 @@ function openLodgingSetup(country) {
       queued.push(current);
       $('#stay-name', wrap).value = '';
       $('#stay-place', wrap).value = '';
+      $('#stay-address', wrap).value = '';
+      $('#stay-phone', wrap).value = '';
+      $('#stay-maps', wrap).value = '';
       $('#stay-note', wrap).value = '';
       $('#stay-queue', wrap).textContent = `已加入 ${queued.length} 間，可再填下一間`;
     } catch (err) {
@@ -1116,8 +1198,14 @@ function openFoodModal({ date, item } = {}) {
     <select id="food-meal">${MEALS.map((m) => `<option ${m === (value.meal || '午餐') ? 'selected' : ''}>${m}</option>`).join('')}</select>
     <label>時間</label>
     <input id="food-time" type="time" value="${escapeHtml(value.time || '')}" />
-    <label>地址或地圖連結</label>
-    <input id="food-place" maxlength="200" placeholder="地址，或貼上地圖連結" value="${escapeHtml(value.place || '')}" />
+    <label>地點（用來搜尋）</label>
+    <input id="food-place" maxlength="200" placeholder="城市或區域，例如：淺草" value="${escapeHtml(value.place || '')}" />
+    <label>地址</label>
+    <input id="food-address" maxlength="200" placeholder="可留空，選定分店後會自動帶入" value="${escapeHtml(value.address || '')}" />
+    <label>電話</label>
+    <input id="food-phone" type="tel" maxlength="40" placeholder="可留空，選定分店後會自動帶入" value="${escapeHtml(value.phone || '')}" />
+    <label>Google 地圖連結</label>
+    <input id="food-maps" maxlength="500" placeholder="可留空，選定分店後會自動帶入" value="${escapeHtml(value.mapsUrl || '')}" />
     <label>訂位備註</label>
     <input id="food-note" maxlength="200" placeholder="人數、訂位名…" value="${escapeHtml(value.note || '')}" />
   `, async (wrap) => {
@@ -1129,6 +1217,9 @@ function openFoodModal({ date, item } = {}) {
       meal: $('#food-meal', wrap).value,
       time: $('#food-time', wrap).value,
       place: $('#food-place', wrap).value.trim().slice(0, 200),
+      address: $('#food-address', wrap).value.trim().slice(0, 200),
+      phone: $('#food-phone', wrap).value.trim().slice(0, 40),
+      mapsUrl: $('#food-maps', wrap).value.trim().slice(0, 500),
       note: $('#food-note', wrap).value.trim().slice(0, 200),
     };
     let restaurants;

@@ -583,6 +583,7 @@ function placeCandidate(place) {
     rating: typeof place.rating === 'number' ? place.rating : null,
     userRatingCount: typeof place.userRatingCount === 'number' ? place.userRatingCount : null,
     googleMapsUri: typeof place.googleMapsUri === 'string' ? place.googleMapsUri : '',
+    phone: String(place.nationalPhoneNumber || place.internationalPhoneNumber || '').replace(/\s+/g, ' ').trim().slice(0, 40),
     reviews: (place.reviews || []).slice(0, 3).map(placeSnippet).filter(Boolean),
   };
 }
@@ -599,7 +600,7 @@ app.get('/api/places/reviews', async (req, res) => {
   const cacheId = query.toLowerCase();
   const cache = readPlacesCache();
   const hit = cache[cacheId];
-  if (hit?.fetchedAt && Array.isArray(hit.payload?.candidates) && Date.now() - new Date(hit.fetchedAt).getTime() < PLACES_CACHE_MS) {
+  if (hit?.fetchedAt && hit.payload?.version === 2 && Array.isArray(hit.payload.candidates) && Date.now() - new Date(hit.fetchedAt).getTime() < PLACES_CACHE_MS) {
     return res.json({ enabled: true, cached: true, candidates: hit.payload.candidates });
   }
   try {
@@ -608,7 +609,7 @@ app.get('/api/places/reviews', async (req, res) => {
       headers: {
         'Content-Type': 'application/json',
         'X-Goog-Api-Key': key,
-        'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.rating,places.userRatingCount,places.googleMapsUri,places.reviews',
+        'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.internationalPhoneNumber,places.rating,places.userRatingCount,places.googleMapsUri,places.reviews',
       },
       body: JSON.stringify({ textQuery: query, maxResultCount: 5, languageCode: 'zh-TW' }),
       signal: AbortSignal.timeout(15000),
@@ -619,7 +620,7 @@ app.get('/api/places/reviews', async (req, res) => {
       return res.status(502).json({ enabled: true, error: true });
     }
     const candidates = (data.places || []).slice(0, 5).map(placeCandidate).filter(Boolean);
-    cache[cacheId] = { fetchedAt: new Date().toISOString(), payload: { candidates } };
+    cache[cacheId] = { fetchedAt: new Date().toISOString(), payload: { version: 2, candidates } };
     writePlacesCache(cache);
     res.json({ enabled: true, cached: false, candidates });
   } catch (err) {
