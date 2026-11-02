@@ -1052,15 +1052,94 @@ function openFoodModal({ date, item } = {}) {
   });
 }
 
+function textPlace(value) {
+  const s = String(value || '').trim();
+  if (!s || /^https?:\/\//i.test(s)) return '';
+  return s.slice(0, 80);
+}
+
+function nightLodging(date) {
+  const stays = (state.trip?.lodgings || []).filter((l) => {
+    if (!l.checkIn || !l.checkOut || l.checkOut < l.checkIn) return false;
+    if (l.checkIn === l.checkOut) return l.checkIn === date;
+    return date >= l.checkIn && date < l.checkOut;
+  });
+  stays.sort((a, b) => a.checkIn.localeCompare(b.checkIn) || String(a.name || '').localeCompare(String(b.name || '')));
+  return stays[stays.length - 1] || null;
+}
+
+function lodgingLocation(lodging) {
+  if (!lodging) return '';
+  return textPlace(lodging.place) || textPlace(lodging.name);
+}
+
+function activityLocation(date) {
+  const acts = sortedByTime(state.trip?.days?.[date] || [], 'time').map((a) => textPlace(a.place)).filter(Boolean);
+  if (!acts.length) return '';
+  const counts = new Map();
+  for (const place of acts) counts.set(place, (counts.get(place) || 0) + 1);
+  const max = Math.max(...counts.values());
+  let last = '';
+  for (const place of acts) if (counts.get(place) === max) last = place;
+  return last;
+}
+
+function specificLocation(date) {
+  if (!date) return '';
+  return lodgingLocation(nightLodging(date)) || activityLocation(date);
+}
+
+function dayMainLocation(date) {
+  if (!date) return '';
+  return specificLocation(date) || textPlace(countryForDate(state.trip, date)?.name);
+}
+
+function suggestRideEndpoints(date) {
+  const dates = buildTimelineDays().map(([d]) => d);
+  const idx = dates.indexOf(date);
+  const prev = idx > 0 ? dates[idx - 1] : shiftDate(date, -1);
+  const next = idx >= 0 && idx < dates.length - 1 ? dates[idx + 1] : shiftDate(date, 1);
+  const from = dayMainLocation(prev);
+  const to = specificLocation(date) || dayMainLocation(next) || textPlace(countryForDate(state.trip, date)?.name);
+  return { from, to };
+}
+
+function tripLocationOptions() {
+  const out = [];
+  const add = (value) => {
+    const s = textPlace(value);
+    if (s && !out.includes(s)) out.push(s);
+  };
+  for (const [date] of buildTimelineDays()) add(dayMainLocation(date));
+  for (const lodging of state.trip?.lodgings || []) {
+    add(lodging.place);
+    add(lodging.name);
+  }
+  for (const list of Object.values(state.trip?.days || {})) {
+    for (const activity of list || []) add(activity.place);
+  }
+  for (const restaurant of state.trip?.restaurants || []) add(restaurant.place);
+  for (const ride of state.trip?.transports || []) {
+    add(ride.from);
+    add(ride.to);
+  }
+  for (const country of state.trip?.countries || []) add(country.name);
+  return out;
+}
+
 function openRideModal({ date, item } = {}) {
-  const value = item || { date, type: '火車' };
+  const suggested = item ? null : suggestRideEndpoints(date);
+  const value = item || { date, type: '火車', from: suggested.from, to: suggested.to };
+  const locationOptions = tripLocationOptions().map((place) => `<option value="${escapeHtml(place)}"></option>`).join('');
   openModal(item ? '編輯交通' : '新增交通', `
     <label>類型</label>
     <select id="ride-type">${RIDE_TYPES.map((m) => `<option ${m === (value.type || '火車') ? 'selected' : ''}>${m}</option>`).join('')}</select>
+    ${suggested && (suggested.from || suggested.to) ? '<div class="muted">已依前一天與當天的地點預填，可以直接修改。</div>' : ''}
     <label>出發地</label>
-    <input id="ride-from" maxlength="80" placeholder="例如：東京車站" value="${escapeHtml(value.from || '')}" />
+    <input id="ride-from" list="ride-locations" maxlength="80" placeholder="例如：東京" value="${escapeHtml(value.from || '')}" />
     <label>目的地</label>
-    <input id="ride-to" maxlength="80" placeholder="例如：京都" value="${escapeHtml(value.to || '')}" />
+    <input id="ride-to" list="ride-locations" maxlength="80" placeholder="例如：大阪" value="${escapeHtml(value.to || '')}" />
+    <datalist id="ride-locations">${locationOptions}</datalist>
     <label>出發時間</label>
     <input id="ride-depart" type="time" value="${escapeHtml(value.depart || '')}" />
     <label>抵達時間</label>
