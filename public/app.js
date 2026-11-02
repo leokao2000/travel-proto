@@ -406,10 +406,45 @@ function lodgingOn(date) {
   return (state.trip.lodgings || []).filter((l) => l.checkIn && l.checkOut && date >= l.checkIn && date <= l.checkOut);
 }
 
+function blockPrefs() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(`tp_blocks_${state.tripId}`) || '{}');
+    return {
+      activity: raw.activity !== false,
+      food: raw.food !== false,
+      stay: raw.stay !== false,
+      ride: raw.ride !== false,
+    };
+  } catch {
+    return { activity: true, food: true, stay: true, ride: true };
+  }
+}
+
+function saveBlockPrefs(prefs) {
+  localStorage.setItem(`tp_blocks_${state.tripId}`, JSON.stringify(prefs));
+}
+
+function blockCounts(trip) {
+  const activity = Object.values(trip.days || {}).reduce((n, list) => n + (Array.isArray(list) ? list.length : 0), 0);
+  return {
+    activity,
+    food: (trip.restaurants || []).length,
+    stay: (trip.lodgings || []).length,
+    ride: (trip.transports || []).length,
+  };
+}
+
+function blockToggleHtml(key, label, count, on) {
+  const badge = count > 0 ? `<span class="toggle-count">${count}</span>` : '';
+  return `<button type="button" class="block-toggle${on ? ' on' : ''}" data-toggle-block="${key}" aria-pressed="${on ? 'true' : 'false'}">${label}${badge}</button>`;
+}
+
 function renderTimeline() {
   const el = $('#tab-timeline');
   const trip = state.trip;
   const days = buildTimelineDays();
+  const prefs = blockPrefs();
+  const counts = blockCounts(trip);
   el.innerHTML = `
     <div class="card">
       <div class="row" style="align-items:flex-start">
@@ -447,6 +482,12 @@ function renderTimeline() {
     </div>
     <div class="card">
       <h2>行程時間軸</h2>
+      <div class="block-toggles" role="group" aria-label="顯示分類">
+        ${blockToggleHtml('activity', '活動', counts.activity, prefs.activity)}
+        ${blockToggleHtml('food', '餐廳', counts.food, prefs.food)}
+        ${blockToggleHtml('stay', '住宿', counts.stay, prefs.stay)}
+        ${blockToggleHtml('ride', '交通', counts.ride, prefs.ride)}
+      </div>
       ${days.length ? days.map(([date, countries]) => {
         const acts = sortedByTime(trip.days?.[date] || [], 'time');
         const foods = sortedByTime((trip.restaurants || []).filter((r) => r.date === date), 'time');
@@ -460,9 +501,9 @@ function renderTimeline() {
                 <strong>${date}（週${weekday(date)}）</strong>
                 <div>${countries.map((c) => `<span class="chip">${countrySvg(c.code, 'sm')}${escapeHtml(c.name)} ${localTime(c.tz)}</span>`).join(' ')}</div>
               </div>
-              <button class="ghost" data-add-act="${date}" type="button">+ 活動</button>
+              <button class="ghost ${prefs.activity ? '' : 'hidden'}" data-add-act="${date}" type="button">+ 活動</button>
             </div>
-            <div class="timeline">
+            <div class="timeline ${prefs.activity ? '' : 'hidden'}">
               ${acts.map((a) => `
                 <div class="activity">
                   <div class="activity-main">
@@ -476,8 +517,8 @@ function renderTimeline() {
                 </div>
               `).join('') || '<div class="muted" style="padding-top:0.4rem">尚無活動</div>'}
             </div>
-            <div class="day-blocks">
-              <section class="block block-food">
+            <div class="day-blocks ${prefs.food || prefs.stay || prefs.ride ? '' : 'hidden'}">
+              <section class="block block-food ${prefs.food ? '' : 'hidden'}">
                 <div class="block-head">${ICON_FOOD}<h3 class="block-title">餐廳</h3><button class="secondary slim" type="button" data-add-food="${date}">新增</button></div>
                 ${foods.map((r) => `
                   <div class="block-card">
@@ -493,7 +534,7 @@ function renderTimeline() {
                   </div>
                 `).join('') || '<div class="empty-line">尚無餐廳</div>'}
               </section>
-              <section class="block block-stay">
+              <section class="block block-stay ${prefs.stay ? '' : 'hidden'}">
                 <div class="block-head">${ICON_STAY}<h3 class="block-title">住宿</h3><button class="secondary slim" type="button" data-add-stay="${date}">新增</button></div>
                 ${stays.map((l) => `
                   <div class="block-card">
@@ -512,7 +553,7 @@ function renderTimeline() {
                   </div>
                 `).join('') || '<div class="empty-line">尚無住宿</div>'}
               </section>
-              <section class="block block-ride">
+              <section class="block block-ride ${prefs.ride ? '' : 'hidden'}">
                 <div class="block-head">${ICON_RIDE}<h3 class="block-title">交通</h3><button class="secondary slim" type="button" data-add-ride="${date}">新增</button></div>
                 ${rides.map((r) => `
                   <div class="block-card">
@@ -536,6 +577,13 @@ function renderTimeline() {
       }).join('') : '<div class="muted">請先為國家設定日期區間</div>'}
     </div>
   `;
+  $$('[data-toggle-block]', el).forEach((btn) => btn.addEventListener('click', () => {
+    const prefsNow = blockPrefs();
+    const key = btn.dataset.toggleBlock;
+    prefsNow[key] = !prefsNow[key];
+    saveBlockPrefs(prefsNow);
+    render();
+  }));
   $('#btn-import')?.addEventListener('click', () => openImportSheet());
   $('#btn-copy-code')?.addEventListener('click', async () => {
     try {

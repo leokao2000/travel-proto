@@ -116,7 +116,7 @@ label { display: block; font-size: 0.85rem; color: var(--muted); margin: 0.6rem 
 }
 .topbar h1 { margin: 0; font-size: 1.25rem; }
 .topbar .sub { color: var(--muted); font-size: 0.85rem; margin-top: 0.2rem; }
-.content { flex: 1; padding: 0 1rem 5.5rem; }
+.content { flex: 1; padding: 0 1rem calc(7.75rem + env(safe-area-inset-bottom)); }
 .card {
   background: var(--card); border-radius: var(--radius); box-shadow: var(--shadow);
   padding: 1rem; margin-bottom: 0.85rem;
@@ -133,7 +133,7 @@ label { display: block; font-size: 0.85rem; color: var(--muted); margin: 0.6rem 
 .muted { color: var(--muted); font-size: 0.85rem; }
 .tabs {
   position: fixed; left: 50%; transform: translateX(-50%);
-  bottom: 0; width: min(430px, 100%);
+  bottom: 0; width: min(430px, 100%); z-index: 25;
   display: grid; grid-template-columns: repeat(4, 1fr);
   background: var(--card); background: color-mix(in srgb, var(--card) 92%, transparent); border-top: 1px solid var(--line);
   backdrop-filter: blur(12px); padding: 0.35rem 0.4rem calc(0.35rem + env(safe-area-inset-bottom));
@@ -150,7 +150,8 @@ label { display: block; font-size: 0.85rem; color: var(--muted); margin: 0.6rem 
   overflow: hidden;
 }
 .day-head { display: flex; justify-content: space-between; gap: 0.5rem; align-items: flex-start; }
-.day-head > div { position: relative; z-index: 1; }
+.day-head > div { position: relative; z-index: 1; min-width: 0; flex: 1; }
+.day-head > button { position: static; flex: none; white-space: nowrap; }
 .day-mark {
   position: absolute; right: -4px; top: 28px; opacity: 0.14;
   pointer-events: none; z-index: 0;
@@ -168,8 +169,19 @@ label { display: block; font-size: 0.85rem; color: var(--muted); margin: 0.6rem 
 .block {
   border-radius: 14px; padding: 0.65rem 0.7rem 0.55rem;
 }
-.block-head { display: flex; align-items: center; gap: 0.35rem; }
-.block-title { margin: 0; flex: 1; font-size: 0.95rem; font-weight: 700; letter-spacing: 0.01em; }
+.block-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.4rem;
+}
+.block-title { margin: 0; min-width: 0; font-size: 0.95rem; font-weight: 700; letter-spacing: 0.01em; }
+.block-head button {
+  position: static;
+  justify-self: end;
+  white-space: nowrap;
+  flex: none;
+}
 .block-icon { width: 20px; height: 20px; flex: none; }
 .block-card {
   background: var(--card);
@@ -286,6 +298,58 @@ label { display: block; font-size: 0.85rem; color: var(--muted); margin: 0.6rem 
   box-shadow: 0 0 0 3px var(--swatch-soft, var(--accent-soft));
 }
 .queue-note { min-height: 1.2em; }
+.block-toggles {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.35rem;
+  margin: 0 0 0.8rem;
+}
+.block-toggle {
+  position: static;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.2rem;
+  min-height: 40px;
+  padding: 0.35rem 0.15rem;
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--muted);
+  border: 1px solid var(--line);
+  font-size: 0.78rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.block-toggle .toggle-count {
+  min-width: 1.05rem;
+  padding: 0 0.28rem;
+  border-radius: 999px;
+  background: var(--line);
+  color: var(--ink);
+  font-size: 0.68rem;
+  line-height: 1.4;
+}
+.block-toggle.on[data-toggle-block="activity"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: transparent;
+}
+.block-toggle.on[data-toggle-block="food"] {
+  background: var(--food-soft);
+  color: var(--food-ink);
+  border-color: var(--food-line);
+}
+.block-toggle.on[data-toggle-block="stay"] {
+  background: var(--stay-soft);
+  color: var(--stay-ink);
+  border-color: var(--stay-line);
+}
+.block-toggle.on[data-toggle-block="ride"] {
+  background: var(--ride-soft);
+  color: var(--ride-ink);
+  border-color: var(--ride-line);
+}
+.block-toggle.on .toggle-count { background: var(--card); }
 .import-cost { margin: 0 0 0.55rem; font-size: 0.82rem; color: var(--muted); }
 .import-check { display: flex; align-items: center; gap: 0.45rem; font-weight: 700; }
 .import-check input { width: auto; flex: none; }
