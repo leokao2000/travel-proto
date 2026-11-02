@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#ecfeff" />
+  <title>旅途夥伴 · 旅行原型</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div id="home" class="app">
+    <div class="topbar">
+      <h1>旅途夥伴</h1>
+      <div class="sub">多國時間軸 · 邀請碼群組 · 分帳 · 私人預算</div>
+    </div>
+    <div class="content">
+      <div class="card">
+        <h2>建立新旅行</h2>
+        <form id="form-create" class="stack">
+          <label>旅行名稱</label>
+          <input id="create-title" required maxlength="80" placeholder="例如：春季日韓行" />
+          <label>你的暱稱</label>
+          <input id="create-nick" required maxlength="40" placeholder="例如：Leo" />
+          <button type="submit">建立並產生邀請碼</button>
+        </form>
+      </div>
+      <div class="card">
+        <h2>加入旅伴的旅行</h2>
+        <form id="form-join" class="stack">
+          <label>邀請碼</label>
+          <input id="join-code" required maxlength="12" placeholder="六碼邀請碼" style="text-transform:uppercase;letter-spacing:0.12em" />
+          <label>你的暱稱</label>
+          <input id="join-nick" required maxlength="40" placeholder="顯示給旅伴看的名字" />
+          <button class="secondary" type="submit">加入</button>
+        </form>
+      </div>
+      <div class="card muted">
+        原型說明：群組行程與帳本存在伺服器並約每 7 秒同步；私人預算只存在你的手機瀏覽器。結算以 TWD 為基準，匯率為預估匯率（約每週更新，可手動立即更新）。支援幣別：EUR、CHF、JPY、TWD、CNY、HKD、AUD、NZD、KRW。
+      </div>
+    </div>
+  </div>
+
+  <div id="app" class="app hidden">
+    <div class="topbar">
+      <h1>旅途夥伴</h1>
+      <div class="sub" id="app-sub"></div>
+    </div>
+    <div class="content">
+      <div id="tab-timeline" class="tab-panel"></div>
+      <div id="tab-expenses" class="tab-panel hidden"></div>
+      <div id="tab-private" class="tab-panel hidden"></div>
+      <div id="tab-more" class="tab-panel hidden"></div>
+    </div>
+    <nav class="tabs">
+      <button type="button" data-tab="timeline" class="active">行程</button>
+      <button type="button" data-tab="expenses">帳本</button>
+      <button type="button" data-tab="private">私人</button>
+      <button type="button" data-tab="more">更多</button>
+    </nav>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>

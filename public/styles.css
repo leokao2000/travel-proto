@@ -1,0 +1,113 @@
+:root {
+  --bg: #f4f1eb;
+  --card: #ffffff;
+  --ink: #1c1917;
+  --muted: #78716c;
+  --line: #e7e5e4;
+  --accent: #0f766e;
+  --accent-soft: #ccfbf1;
+  --warn: #b45309;
+  --danger: #b91c1c;
+  --radius: 16px;
+  --shadow: 0 8px 24px rgba(28, 25, 23, 0.08);
+  font-family: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", system-ui, sans-serif;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink); }
+body { min-height: 100dvh; }
+button, input, select, textarea {
+  font: inherit; color: inherit;
+}
+button {
+  border: 0; border-radius: 999px; padding: 0.7rem 1.1rem;
+  background: var(--accent); color: #fff; font-weight: 600; cursor: pointer;
+}
+button.secondary { background: #fff; color: var(--ink); border: 1px solid var(--line); }
+button.ghost { background: transparent; color: var(--accent); padding: 0.4rem 0.6rem; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+input, select, textarea {
+  width: 100%; border: 1px solid var(--line); border-radius: 12px;
+  padding: 0.75rem 0.9rem; background: #fff;
+}
+label { display: block; font-size: 0.85rem; color: var(--muted); margin: 0.6rem 0 0.3rem; }
+.app {
+  max-width: 430px; margin: 0 auto; min-height: 100dvh;
+  display: flex; flex-direction: column; background: linear-gradient(180deg, #ecfeff 0%, var(--bg) 180px);
+}
+.topbar {
+  position: sticky; top: 0; z-index: 10;
+  padding: 0.9rem 1rem 0.6rem; backdrop-filter: blur(10px);
+  background: rgba(244, 241, 235, 0.85);
+}
+.topbar h1 { margin: 0; font-size: 1.25rem; }
+.topbar .sub { color: var(--muted); font-size: 0.85rem; margin-top: 0.2rem; }
+.content { flex: 1; padding: 0 1rem 5.5rem; }
+.card {
+  background: var(--card); border-radius: var(--radius); box-shadow: var(--shadow);
+  padding: 1rem; margin-bottom: 0.85rem;
+}
+.card h2 { margin: 0 0 0.6rem; font-size: 1.05rem; }
+.row { display: flex; gap: 0.5rem; align-items: center; }
+.row > * { flex: 1; }
+.stack > * + * { margin-top: 0.55rem; }
+.chip {
+  display: inline-flex; align-items: center; gap: 0.3rem;
+  background: var(--accent-soft); color: var(--accent);
+  border-radius: 999px; padding: 0.2rem 0.65rem; font-size: 0.8rem; font-weight: 600;
+}
+.muted { color: var(--muted); font-size: 0.85rem; }
+.tabs {
+  position: fixed; left: 50%; transform: translateX(-50%);
+  bottom: 0; width: min(430px, 100%);
+  display: grid; grid-template-columns: repeat(4, 1fr);
+  background: rgba(255,255,255,0.95); border-top: 1px solid var(--line);
+  backdrop-filter: blur(12px); padding: 0.35rem 0.4rem calc(0.35rem + env(safe-area-inset-bottom));
+}
+.tabs button {
+  background: transparent; color: var(--muted); border-radius: 12px;
+  padding: 0.55rem 0.2rem; font-size: 0.78rem; font-weight: 600;
+}
+.tabs button.active { color: var(--accent); background: var(--accent-soft); }
+.day {
+  border: 1px solid var(--line); border-radius: 14px; padding: 0.75rem; margin-bottom: 0.6rem;
+}
+.day-head { display: flex; justify-content: space-between; gap: 0.5rem; align-items: baseline; }
+.activity {
+  display: flex; justify-content: space-between; gap: 0.5rem;
+  padding: 0.45rem 0; border-top: 1px dashed var(--line); font-size: 0.92rem;
+}
+.expense {
+  display: grid; gap: 0.25rem; padding: 0.7rem 0; border-bottom: 1px solid var(--line);
+}
+.expense:last-child { border-bottom: 0; }
+.badge {
+  display: inline-block; font-size: 0.72rem; font-weight: 700;
+  padding: 0.1rem 0.45rem; border-radius: 999px; background: #fef3c7; color: var(--warn);
+}
+.badge.shared { background: var(--accent-soft); color: var(--accent); }
+.hidden { display: none !important; }
+.modal-backdrop {
+  position: fixed; inset: 0; background: rgba(28,25,23,0.45);
+  display: flex; align-items: flex-end; justify-content: center; z-index: 30;
+}
+.modal {
+  width: min(430px, 100%); background: #fff; border-radius: 20px 20px 0 0;
+  padding: 1rem 1rem calc(1rem + env(safe-area-inset-bottom));
+  max-height: 88dvh; overflow: auto;
+}
+.modal h3 { margin: 0 0 0.5rem; }
+.actions { display: flex; gap: 0.5rem; margin-top: 0.9rem; }
+.actions button { flex: 1; }
+.country-card {
+  border: 1px solid var(--line); border-radius: 14px; padding: 0.75rem; margin-bottom: 0.55rem;
+}
+.balance-line { display: flex; justify-content: space-between; padding: 0.35rem 0; }
+.invite {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.12em; font-size: 1.4rem; font-weight: 700;
+}
+.toast {
+  position: fixed; left: 50%; transform: translateX(-50%);
+  bottom: 4.8rem; background: #1c1917; color: #fff;
+  padding: 0.55rem 0.9rem; border-radius: 999px; font-size: 0.85rem; z-index: 40;
+}
