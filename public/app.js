@@ -57,6 +57,7 @@ const state = {
   placeReviews: {},
   expandedReviews: new Set(),
   flightLookup: false,
+  pushEnabled: false,
 };
 
 const $ = (sel, el = document) => el.querySelector(sel);
@@ -681,6 +682,7 @@ let saveChain = Promise.resolve();
 function saveTrip(patch) {
   const run = async () => {
     if (!state.trip) return;
+    if (navigator.onLine === false) throw new Error('離線時無法修改，以免蓋過旅伴的更新');
     const body = {
       memberId: state.memberId,
       title: patch.title ?? state.trip.title,
@@ -692,7 +694,15 @@ function saveTrip(patch) {
       transports: patch.transports ?? state.trip.transports ?? [],
       flights: patch.flights ?? state.trip.flights ?? emptyFlights(),
     };
-    const data = await api(`/api/trips/${state.trip.id}`, { method: 'PUT', body: JSON.stringify(body) });
+    let data;
+    try {
+      data = await api(`/api/trips/${state.trip.id}`, { method: 'PUT', body: JSON.stringify(body) });
+    } catch (err) {
+      if (navigator.onLine === false || err.message === 'Failed to fetch') {
+        throw new Error('離線時無法修改，以免蓋過旅伴的更新');
+      }
+      throw err;
+    }
     adoptTrip(data.trip);
     render();
   };
@@ -725,6 +735,7 @@ function showApp() {
   render();
   startPolling();
   notifyDrafts();
+  maybeRemindDepartures();
 }
 
 function currencyOptions(selected = 'TWD') {
@@ -745,14 +756,25 @@ function computeSettlement() {
   for (const e of trip.expenses || []) {
     const twd = toTwd(e.amount, e.currency, rates);
     if (twd == null) continue;
-    if (!e.shared) {
+    if (e.kind === 'settlement') {
+      bal[e.fromId] = (bal[e.fromId] || 0) + twd;
+      bal[e.toId] = (bal[e.toId] || 0) - twd;
+      continue;
+    }
+    if (!e.shared) continue;
+    groupTotalTwd += twd;
+    bal[e.payerId] = (bal[e.payerId] || 0) + twd;
+    if (Array.isArray(e.shares) && e.shares.length) {
+      for (const share of e.shares) {
+        const part = toTwd(share.amount, e.currency, rates);
+        if (part == null) continue;
+        bal[share.memberId] = (bal[share.memberId] || 0) - part;
+      }
       continue;
     }
     const splitWith = (e.splitWith && e.splitWith.length ? e.splitWith : members.map((m) => m.id));
     const n = splitWith.length || 1;
     const share = twd / n;
-    groupTotalTwd += twd;
-    bal[e.payerId] = (bal[e.payerId] || 0) + twd;
     for (const mid of splitWith) bal[mid] = (bal[mid] || 0) - share;
   }
   const debtors = [];
@@ -1022,7 +1044,10 @@ function renderTimeline() {
       </div>
     </div>
     <div class="card">
-      <h2>行程時間軸</h2>
+      <div class="row">
+        <h2 style="margin:0;flex:1">行程時間軸</h2>
+        <button type="button" class="secondary slim" id="btn-trip-map">整趟地圖</button>
+      </div>
       <div class="block-toggles" role="group" aria-label="顯示分類">
         ${blockToggleHtml('activity', '活動', counts.activity, prefs.activity)}
         ${blockToggleHtml('food', '餐廳', counts.food, prefs.food)}
@@ -1047,6 +1072,7 @@ function renderTimeline() {
                 <strong>${date}（週${weekday(date)}）</strong>
                 <div>${countries.map((c) => `<button type="button" class="chip" data-chip-date="${date}" data-country-key="${escapeHtml(countryKey(c))}" aria-label="更改${escapeHtml(c.name)}">${renderPattern(c, 1, 'sm')}${escapeHtml(c.name)} ${escapeHtml(offsetLabel(c.tz, date))}</button>`).join(' ')}</div>
               </div>
+              <button class="ghost" data-day-map="${date}" type="button">地圖</button>
               <button class="ghost ${prefs.activity ? '' : 'hidden'}" data-add-act="${date}" type="button">+ 活動</button>
             </div>
             <div class="timeline ${prefs.activity ? '' : 'hidden'}">
@@ -1205,6 +1231,8 @@ function renderTimeline() {
     render();
   }));
   $('#btn-import')?.addEventListener('click', () => openImportSheet());
+  $('#btn-trip-map')?.addEventListener('click', () => openMapSheet(null));
+  $$('[data-day-map]', el).forEach((btn) => btn.addEventListener('click', () => openMapSheet(btn.dataset.dayMap)));
   $('#btn-save-device-timeline')?.addEventListener('click', async () => {
     try {
       await saveDeviceBackup();
@@ -1304,27 +1332,61 @@ function renderExpenses() {
           <div class="expense">
             <div class="row">
               <strong style="flex:1">${escapeHtml(e.desc)}</strong>
-              <span class="badge ${e.shared ? 'shared' : ''}">${e.shared ? '分攤' : '不分攤'}</span>
+              <span class="badge ${e.kind === 'settlement' ? '' : e.shared ? 'shared' : ''}">${e.kind === 'settlement' ? '已付清' : e.shared ? (e.shares?.length ? '自訂分攤' : '分攤') : '不分攤'}</span>
             </div>
-            <div>${fmtMoney(e.amount, e.currency)} ${e.currency !== 'TWD' && twd != null ? `<span class="muted">≈ ${fmtMoney(twd, 'TWD')}</span>` : ''}</div>
-            <div class="muted">付款：${escapeHtml(memberName(e.payerId))}${e.shared ? ` · 分給 ${(e.splitWith || trip.members.map(m=>m.id)).map(memberName).map(escapeHtml).join('、')}` : ''}</div>
+            <div>${e.kind === 'settlement' ? `NT$${Number(e.amount).toLocaleString('zh-TW')}` : fmtMoney(e.amount, e.currency)} ${e.kind !== 'settlement' && e.currency !== 'TWD' && twd != null ? `<span class="muted">≈ ${fmtMoney(twd, 'TWD')}</span>` : ''}</div>
+            <div class="muted">${e.kind === 'settlement' ? `${escapeHtml(memberName(e.fromId))} → ${escapeHtml(memberName(e.toId))}` : `付款：${escapeHtml(memberName(e.payerId))}${e.shared ? ` · 分給 ${(e.shares?.length ? e.shares.map((s) => s.memberId) : (e.splitWith || trip.members.map((m) => m.id))).map(memberName).map(escapeHtml).join('、')}` : ''}`}</div>
             <button class="ghost" data-del-exp="${e.id}" type="button">刪除</button>
           </div>
         `;
       }).join('') || '<div class="muted">尚無支出</div>'}
     </div>
-    <div class="card">
-      <h2>誰該付給誰（TWD）</h2>
-      ${lines.length ? lines.map((l) => `
-        <div class="balance-line">
-          <span>${escapeHtml(memberName(l.from))} → ${escapeHtml(memberName(l.to))}</span>
-          <strong>${fmtMoney(l.amount, 'TWD')}</strong>
-        </div>
-      `).join('') : '<div class="muted">目前沒有需要結算的分攤</div>'}
-      <div class="muted" style="margin-top:0.5rem">預估匯率更新日期：${state.rates?.updatedAt || '—'}</div>
+    <div class="card" id="settle-card">
+      <div class="row">
+        <h2 style="margin:0;flex:1">結算</h2>
+        <button type="button" class="secondary slim" id="btn-settle">結算</button>
+      </div>
+      <div class="muted">只算共同帳本，不含私人預算。金額是新台幣。</div>
+      <div id="settle-lines" hidden>
+        ${lines.length ? lines.map((l) => `
+          <div class="balance-line">
+            <span>${escapeHtml(memberName(l.from))} → ${escapeHtml(memberName(l.to))} NT$${Math.round(l.amount).toLocaleString('zh-TW')}</span>
+            <button type="button" class="secondary slim" data-settle data-from="${l.from}" data-to="${l.to}" data-amount="${l.amount}">已付清</button>
+          </div>
+        `).join('') : '<div class="muted">目前沒有需要結算的分攤</div>'}
+        <div class="muted" style="margin-top:0.5rem">預估匯率更新日期：${state.rates?.updatedAt || '—'}。按已付清會記一筆同步給旅伴的結算。</div>
+      </div>
     </div>
   `;
   $('#btn-add-expense')?.addEventListener('click', openExpenseModal);
+  $('#btn-settle')?.addEventListener('click', () => {
+    const box = $('#settle-lines', el);
+    if (box) box.hidden = false;
+  });
+  $$('[data-settle]', el).forEach((btn) => btn.addEventListener('click', async () => {
+    const fromId = btn.dataset.from;
+    const toId = btn.dataset.to;
+    const amount = Number(btn.dataset.amount);
+    if (!(amount > 0)) return;
+    const expenses = (state.trip.expenses || []).concat([{
+      id: uid(),
+      kind: 'settlement',
+      desc: `結算 ${memberName(fromId)} → ${memberName(toId)}`,
+      amount,
+      currency: 'TWD',
+      fromId,
+      toId,
+      payerId: fromId,
+      shared: false,
+      createdAt: new Date().toISOString(),
+    }]);
+    try {
+      await saveTrip({ expenses });
+      toast('已記成付清');
+    } catch (err) {
+      toast(err.message || '無法記帳');
+    }
+  }));
   $$('[data-del-exp]', el).forEach((btn) => btn.addEventListener('click', async () => {
     const expenses = (trip.expenses || []).filter((e) => e.id !== btn.dataset.delExp);
     await saveTrip({ expenses });
@@ -1828,6 +1890,17 @@ async function restoreFromDrive() {
 function renderMembers() {
   const el = $('#tab-more');
   el.innerHTML = `
+    <div class="card" id="install-card">
+      <h2>加到主畫面</h2>
+      <div class="muted" id="install-note"></div>
+      <button type="button" id="btn-install" hidden>加到主畫面</button>
+    </div>
+    <div class="card">
+      <h2>出發提醒</h2>
+      <div class="muted">打開這個 App 時，如果明天有 09:00 前出發的交通或航班，會用這台手機的通知提醒一次。推播在伺服器設定前不會送出。</div>
+      <button type="button" id="btn-remind">開啟出發提醒</button>
+      <div class="muted" id="push-note">${state.pushEnabled ? '' : '推播尚未設定'}</div>
+    </div>
     <div class="card" id="settings-theme">
       <h2>主題色</h2>
       <div class="muted">柔和的底色，套用到整個畫面。餐廳、住宿、交通的色塊維持固定，方便分辨。</div>
@@ -1866,6 +1939,8 @@ function renderMembers() {
     </div>
   `;
   bindThemePicker(el);
+  bindInstallCard(el);
+  $('#btn-remind', el)?.addEventListener('click', () => enableReminders());
   $('#btn-save-device')?.addEventListener('click', async () => {
     try {
       await saveDeviceBackup();
@@ -2768,6 +2843,11 @@ function openExpenseModal() {
     <div id="e-split-wrap">
       <label>分攤成員</label>
       ${members.map(m=>`<label class="row"><input type="checkbox" class="e-split" value="${m.id}" checked style="width:auto" /> ${escapeHtml(m.nickname)}</label>`).join('')}
+      <label class="row" style="margin-top:0.6rem"><input id="e-custom" type="checkbox" style="width:auto" /> <span>自訂分攤金額</span></label>
+      <div id="e-custom-wrap" hidden>
+        ${members.map((m) => `<label>${escapeHtml(m.nickname)}（原幣）</label><input id="share-${m.id}" type="number" inputmode="decimal" />`).join('')}
+        <div class="muted">自訂金額加總要等於這筆支出。</div>
+      </div>
     </div>
   `, async (wrap) => {
     const desc = $('#e-desc', wrap).value.trim();
@@ -2776,11 +2856,19 @@ function openExpenseModal() {
     const payerId = $('#e-payer', wrap).value;
     const shared = $('#e-shared', wrap).checked;
     const splitWith = $$('.e-split', wrap).filter((x) => x.checked).map((x) => x.value);
+    const custom = Boolean($('#e-custom', wrap)?.checked);
+    let shares = null;
+    if (shared && custom) {
+      shares = splitWith.map((id) => ({ memberId: id, amount: Number($(`#share-${id}`, wrap)?.value) }));
+      if (shares.some((share) => !(share.amount > 0))) throw new Error('請填每位分攤成員的金額');
+      const sum = shares.reduce((total, share) => total + share.amount, 0);
+      if (Math.abs(sum - amount) > 0.05) throw new Error('自訂金額加總要等於這筆支出');
+    }
     if (!desc || !(amount > 0)) throw new Error('請填說明與金額');
     if (!CURRENCIES.includes(currency)) throw new Error('不支援的幣別');
     if (shared && !splitWith.length) throw new Error('請選擇分攤成員');
     const expenses = (state.trip.expenses || []).concat([{
-      id: uid(), desc, amount, currency, payerId, shared, splitWith, createdAt: new Date().toISOString(),
+      id: uid(), desc, amount, currency, payerId, shared, splitWith, shares, createdAt: new Date().toISOString(),
     }]);
     await saveTrip({ expenses });
   }, { draft: { type: 'expense', id: 'new', day: '' } });
@@ -2791,6 +2879,11 @@ function openExpenseModal() {
     splitWrap.style.display = shared.checked ? '' : 'none';
   });
   shared.dispatchEvent(new Event('change'));
+  const custom = $('#e-custom', backdrop);
+  const customWrap = $('#e-custom-wrap', backdrop);
+  custom?.addEventListener('change', () => {
+    if (customWrap) customWrap.hidden = !custom.checked;
+  });
 }
 
 function maybeWelcomeTheme() {
@@ -3356,6 +3449,440 @@ function bindHome() {
   }));
 }
 
+function taipeiTodayClient() {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+}
+
+function showOfflineBanner(on) {
+  const banner = document.getElementById('offline-banner');
+  if (banner) banner.hidden = !on;
+}
+
+function bindOfflineBanner() {
+  const sync = () => showOfflineBanner(navigator.onLine === false);
+  window.addEventListener('online', () => {
+    sync();
+    if (state.trip) {
+      api(`/api/trips/${state.trip.id}?since=${state.lastSync}`).then((data) => {
+        if (!data.unchanged && data.trip) {
+          adoptTrip(data.trip);
+          render();
+        }
+      }).catch(() => {});
+    }
+  });
+  window.addEventListener('offline', sync);
+  sync();
+}
+
+function registerAppShell() {
+  if (!('serviceWorker' in navigator)) return;
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
+}
+
+function isStandaloneApp() {
+  return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+}
+
+function bindInstallCard(root) {
+  const note = $('#install-note', root);
+  const button = $('#btn-install', root);
+  if (!note) return;
+  if (isStandaloneApp()) {
+    note.textContent = '已在主畫面開啟。';
+    return;
+  }
+  const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
+  if (ios) {
+    note.textContent = '用 Safari 下方的分享按鈕，選「加入主畫面」。iOS 的通知只有加到主畫面後比較穩。';
+    return;
+  }
+  note.textContent = '可以加到手機主畫面，離線時仍看得到上次同步的行程。';
+  if (state.installPrompt) {
+    button.hidden = false;
+    button.addEventListener('click', async () => {
+      state.installPrompt.prompt();
+      await state.installPrompt.userChoice.catch(() => {});
+      state.installPrompt = null;
+      button.hidden = true;
+    });
+  }
+}
+
+function enableReminders() {
+  if (!('Notification' in window)) {
+    toast('這台瀏覽器沒有通知');
+    return;
+  }
+  if (Notification.permission === 'granted') {
+    toast('出發提醒已開啟');
+    maybeRemindDepartures();
+    return;
+  }
+  Notification.requestPermission().then((result) => {
+    if (result === 'granted') {
+      toast('出發提醒已開啟');
+      maybeRemindDepartures();
+    } else toast('沒有允許通知');
+  }).catch(() => toast('沒有允許通知'));
+}
+
+function maybeRemindDepartures() {
+  if (!state.trip || !('Notification' in window) || Notification.permission !== 'granted') return;
+  const tomorrow = shiftDate(taipeiTodayClient(), 1);
+  const key = `tp_remind_${state.tripId}_${tomorrow}`;
+  if (localStorage.getItem(key)) return;
+  const hits = [];
+  for (const ride of state.trip.transports || []) {
+    if (calendarDate(ride.date) === tomorrow && ride.depart && ride.depart < '09:00') {
+      hits.push(`${ride.depart} ${ride.from || ''}→${ride.to || ''}`.trim());
+    }
+  }
+  for (const leg of [state.trip.flights?.outbound, state.trip.flights?.inbound]) {
+    if (leg && calendarDate(leg.date) === tomorrow && leg.depart && leg.depart < '09:00') {
+      hits.push(`${leg.depart} 航班 ${leg.number || ''}`.trim());
+    }
+  }
+  if (!hits.length) return;
+  try {
+    new Notification('Leo prototype', { body: `明天早出發：${hits.slice(0, 3).join('、')}`, lang: 'zh-Hant' });
+    localStorage.setItem(key, '1');
+  } catch (_) { /* permission or unsupported constructor */ }
+}
+
+function haversineKm(a, b) {
+  const R = 6371;
+  const dLat = (b.lat - a.lat) * Math.PI / 180;
+  const dLng = (b.lng - a.lng) * Math.PI / 180;
+  const lat1 = a.lat * Math.PI / 180;
+  const lat2 = b.lat * Math.PI / 180;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+function roughTravelLabel(km) {
+  if (km < 1.2) return `約步行 ${Math.max(1, Math.round((km / 4.5) * 60))} 分鐘`;
+  if (km < 40) return `約車程 ${Math.max(3, Math.round((km / 28) * 60))} 分鐘`;
+  const hours = km / 55;
+  if (hours < 1.5) return `約車程 ${Math.round(hours * 60)} 分鐘`;
+  return `約車程 ${hours.toFixed(1)} 小時`;
+}
+
+function mapsNavUrl(point) {
+  if (Number.isFinite(point.lat) && Number.isFinite(point.lng)) {
+    return `https://www.google.com/maps/dir/?api=1&destination=${point.lat},${point.lng}`;
+  }
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(point.query || point.label || '')}`;
+}
+
+function collectMapPoints(onlyDate) {
+  const trip = state.trip;
+  const days = onlyDate ? [onlyDate] : buildTimelineDays().map(([day]) => day);
+  const points = [];
+  const seenLodging = new Set();
+  for (const day of days) {
+    for (const activity of trip.days?.[day] || []) {
+      points.push({
+        date: day, time: activity.time || '', timed: Boolean(activity.time),
+        label: activityName(activity) || '活動', kind: 'activity',
+        query: activity.place || activityName(activity),
+        lat: Number(activity.lat), lng: Number(activity.lng),
+        ref: { kind: 'activity', date: day, id: activity.id },
+      });
+    }
+    for (const restaurant of trip.restaurants || []) {
+      if (restaurant.date !== day) continue;
+      points.push({
+        date: day, time: restaurant.time || '', timed: Boolean(restaurant.time),
+        label: restaurant.name || '餐廳', kind: 'restaurant',
+        query: restaurant.address || restaurant.place || restaurant.name,
+        lat: Number(restaurant.lat), lng: Number(restaurant.lng),
+        ref: { kind: 'restaurant', id: restaurant.id },
+      });
+    }
+    for (const lodging of lodgingOn(day)) {
+      if (!onlyDate && seenLodging.has(lodging.id)) continue;
+      if (!onlyDate) seenLodging.add(lodging.id);
+      const onCheckIn = calendarDate(lodging.checkIn) === day;
+      if (!onlyDate && !onCheckIn) continue;
+      points.push({
+        date: day, time: onCheckIn ? '00:10' : '23:50', timed: true,
+        label: lodging.name || '住宿', kind: 'lodging',
+        query: lodging.address || lodging.place || lodging.name,
+        lat: Number(lodging.lat), lng: Number(lodging.lng),
+        ref: { kind: 'lodging', id: lodging.id },
+      });
+    }
+    for (const ride of trip.transports || []) {
+      if (calendarDate(ride.date) === day && ride.from) {
+        points.push({
+          date: day, time: ride.depart || '', timed: Boolean(ride.depart),
+          label: ride.from, kind: 'ride', query: ride.from,
+          lat: Number(ride.fromLat), lng: Number(ride.fromLng),
+          ref: { kind: 'ride-from', id: ride.id },
+        });
+      }
+      const arrivalDay = calendarDate(ride.arriveDate) || calendarDate(ride.date);
+      if (arrivalDay === day && ride.to) {
+        points.push({
+          date: day, time: ride.arrive || '99:50', timed: Boolean(ride.arrive),
+          label: ride.to, kind: 'ride', query: ride.to,
+          lat: Number(ride.toLat), lng: Number(ride.toLng),
+          ref: { kind: 'ride-to', id: ride.id },
+        });
+      }
+    }
+  }
+  points.sort((a, b) => `${a.date}${a.time || '99:99'}`.localeCompare(`${b.date}${b.time || '99:99'}`));
+  return points;
+}
+
+function pointQuery(point) {
+  const country = countryForDate(state.trip, point.date)?.name || '';
+  return [point.query, country].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim().slice(0, 180);
+}
+
+async function geocodeQuery(query) {
+  const data = await api(`/api/geocode?q=${encodeURIComponent(query)}`);
+  return data;
+}
+
+function stampCoord(working, ref, lat, lng) {
+  if (ref.kind === 'activity') {
+    working.days[ref.date] = (working.days[ref.date] || []).map((item) => item.id === ref.id ? { ...item, lat, lng } : item);
+  } else if (ref.kind === 'restaurant') {
+    working.restaurants = working.restaurants.map((item) => item.id === ref.id ? { ...item, lat, lng } : item);
+  } else if (ref.kind === 'lodging') {
+    working.lodgings = working.lodgings.map((item) => item.id === ref.id ? { ...item, lat, lng } : item);
+  } else if (ref.kind === 'ride-from') {
+    working.transports = working.transports.map((item) => item.id === ref.id ? { ...item, fromLat: lat, fromLng: lng } : item);
+  } else if (ref.kind === 'ride-to') {
+    working.transports = working.transports.map((item) => item.id === ref.id ? { ...item, toLat: lat, toLng: lng } : item);
+  }
+}
+
+async function fillPointCoords(points, status) {
+  const working = {
+    days: JSON.parse(JSON.stringify(state.trip.days || {})),
+    restaurants: JSON.parse(JSON.stringify(state.trip.restaurants || [])),
+    lodgings: JSON.parse(JSON.stringify(state.trip.lodgings || [])),
+    transports: JSON.parse(JSON.stringify(state.trip.transports || [])),
+  };
+  let changed = false;
+  for (const point of points) {
+    if (Number.isFinite(point.lat) && Number.isFinite(point.lng)) continue;
+    const query = pointQuery(point);
+    if (!query) continue;
+    if (navigator.onLine === false) break;
+    if (status) status.textContent = `正在查詢「${query}」…`;
+    try {
+      const found = await geocodeQuery(query);
+      point.lat = found.lat;
+      point.lng = found.lng;
+      stampCoord(working, point.ref, found.lat, found.lng);
+      changed = true;
+    } catch (_) {
+      point.missing = true;
+    }
+  }
+  if (!changed || navigator.onLine === false) return;
+  try { await saveTrip(working); } catch (_) { /* coords still usable in this view */ }
+}
+
+function loadStyle(href) {
+  return new Promise((resolve, reject) => {
+    if (document.querySelector(`link[href="${href}"]`)) { resolve(); return; }
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = href;
+    link.onload = () => resolve();
+    link.onerror = () => reject(new Error('無法載入地圖樣式'));
+    document.head.appendChild(link);
+  });
+}
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
+    const script = document.createElement('script');
+    script.src = src;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error('無法載入地圖'));
+    document.body.appendChild(script);
+  });
+}
+
+async function ensureLeaflet() {
+  if (window.L) return window.L;
+  await loadStyle('/vendor/leaflet/leaflet.css');
+  await loadScript('/vendor/leaflet/leaflet.js');
+  return window.L;
+}
+
+function nearestUntimed(points) {
+  const untimed = points.filter((point) => !point.timed && Number.isFinite(point.lat) && Number.isFinite(point.lng));
+  if (untimed.length < 2) return null;
+  const timed = points.filter((point) => point.timed && Number.isFinite(point.lat));
+  const remaining = untimed.slice();
+  let current = timed.length ? timed[timed.length - 1] : remaining.shift();
+  const ordered = timed.length ? [] : [current];
+  while (remaining.length) {
+    let best = 0;
+    let bestDistance = Infinity;
+    remaining.forEach((point, index) => {
+      const distance = haversineKm(current, point);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = index;
+      }
+    });
+    current = remaining.splice(best, 1)[0];
+    ordered.push(current);
+  }
+  return ordered;
+}
+
+async function applyUntimedOrder(date, ordered) {
+  const trip = state.trip;
+  const days = { ...(trip.days || {}) };
+  const acts = (days[date] || []).slice();
+  const actOrder = ordered.filter((point) => point.ref.kind === 'activity').map((point) => point.ref.id);
+  const timedActs = acts.filter((item) => item.time);
+  const untimedActs = acts.filter((item) => !item.time);
+  untimedActs.sort((a, b) => actOrder.indexOf(a.id) - actOrder.indexOf(b.id));
+  days[date] = timedActs.concat(untimedActs);
+  const foodOrder = ordered.filter((point) => point.ref.kind === 'restaurant').map((point) => point.ref.id);
+  const restaurants = (trip.restaurants || []).filter((item) => !(item.date === date && !item.time));
+  const untimedFood = (trip.restaurants || []).filter((item) => item.date === date && !item.time);
+  untimedFood.sort((a, b) => foodOrder.indexOf(a.id) - foodOrder.indexOf(b.id));
+  await saveTrip({ days, restaurants: restaurants.concat(untimedFood) });
+}
+
+function drawMap(points) {
+  const L = window.L;
+  const located = points.filter((point) => Number.isFinite(point.lat) && Number.isFinite(point.lng));
+  const map = L.map('leaflet-map', { attributionControl: true });
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+  }).addTo(map);
+  const markers = located.map((point, index) => {
+    const marker = L.marker([point.lat, point.lng], {
+      icon: L.divIcon({
+        className: 'map-pin-wrap',
+        html: `<span class="map-pin">${index + 1}</span>`,
+        iconSize: [28, 28],
+        iconAnchor: [14, 14],
+      }),
+    });
+    marker.bindPopup(`<strong>${escapeHtml(point.label)}</strong><br><a href="${mapsNavUrl(point)}" target="_blank" rel="noopener">用 Google 地圖導航</a>`);
+    marker.addTo(map);
+    return marker;
+  });
+  if (located.length >= 2) {
+    L.polyline(located.map((point) => [point.lat, point.lng]), { color: '#0f766e', weight: 4 }).addTo(map);
+  }
+  if (located.length) map.fitBounds(L.latLngBounds(located.map((point) => [point.lat, point.lng])).pad(0.2));
+  else map.setView([25.03, 121.56], 6);
+  setTimeout(() => map.invalidateSize(), 80);
+  return { map, markers };
+}
+
+function mapListHtml(points) {
+  const located = points.filter((point) => Number.isFinite(point.lat) && Number.isFinite(point.lng));
+  return points.map((point) => {
+    const index = located.indexOf(point);
+    const number = index >= 0 ? `${index + 1}. ` : '';
+    const next = located[index + 1];
+    const leg = index >= 0 && next ? `<div class="map-leg">${roughTravelLabel(haversineKm(point, next))}</div>` : '';
+    const when = [point.date, point.time && point.time !== '00:10' && point.time !== '99:50' ? point.time : ''].filter(Boolean).join(' ');
+    return `<div class="map-stop"><strong>${number}${escapeHtml(point.label)}</strong> <span class="muted">${escapeHtml(when)}</span>${point.missing ? ' <span class="muted">尚未定位</span>' : ''}<div><a href="${mapsNavUrl(point)}" target="_blank" rel="noopener noreferrer">用 Google 地圖導航</a></div>${leg}</div>`;
+  }).join('');
+}
+
+async function openMapSheet(date) {
+  const wrap = document.createElement('div');
+  wrap.className = 'modal-backdrop';
+  wrap.innerHTML = `
+    <div class="modal map-modal">
+      <h3>${date ? `${escapeHtml(date)} 地圖` : '整趟地圖'}</h3>
+      <div id="leaflet-map"></div>
+      <div id="map-status" class="muted">正在整理地點…</div>
+      <div id="map-stops"></div>
+      <div class="actions">
+        ${date ? '<button type="button" class="secondary" id="btn-route-suggest">建議順路順序</button>' : ''}
+        <button type="button" class="secondary" data-cancel>關閉</button>
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+  const close = () => wrap.remove();
+  wrap.addEventListener('click', (event) => { if (event.target === wrap) close(); });
+  $('[data-cancel]', wrap).addEventListener('click', close);
+  let points = collectMapPoints(date);
+  const status = $('#map-status', wrap);
+  if (!points.length) {
+    status.textContent = '這天還沒有可放上地圖的地點。';
+    return;
+  }
+  try {
+    await ensureLeaflet();
+  } catch (err) {
+    status.textContent = err.message || '無法載入地圖';
+    return;
+  }
+  await fillPointCoords(points, status);
+  points = collectMapPoints(date).map((point) => {
+    const previous = points.find((item) => item.ref.kind === point.ref.kind && item.ref.id === point.ref.id && item.query === point.query);
+    if (previous?.missing) point.missing = true;
+    if (previous && Number.isFinite(previous.lat)) {
+      point.lat = previous.lat;
+      point.lng = previous.lng;
+    }
+    return point;
+  });
+  const located = points.filter((point) => Number.isFinite(point.lat) && Number.isFinite(point.lng));
+  status.textContent = located.length ? '路線是直線連接，時間標「約」，不是實際路況。地圖 © OpenStreetMap。' : '這些地點還沒有座標。';
+  $('#map-stops', wrap).innerHTML = mapListHtml(points);
+  drawMap(points);
+  $('#btn-route-suggest', wrap)?.addEventListener('click', () => {
+    const suggestion = nearestUntimed(points);
+    if (!suggestion) {
+      toast('至少要兩個沒填時間、且已定位的點');
+      return;
+    }
+    const ask = document.createElement('div');
+    ask.className = 'modal-backdrop';
+    ask.innerHTML = `
+      <div class="modal">
+        <h3>建議順路順序</h3>
+        <div class="muted">只調整沒有填時間的項目，從最後一個有時間的點開始就近排列。確認後才會改。</div>
+        <ol>${suggestion.map((point) => `<li>${escapeHtml(point.label)}</li>`).join('')}</ol>
+        <div class="actions">
+          <button type="button" class="secondary" data-no>取消</button>
+          <button type="button" data-yes>套用順序</button>
+        </div>
+      </div>`;
+    document.body.appendChild(ask);
+    const done = (yes) => { ask.remove(); return yes; };
+    $('[data-no]', ask).addEventListener('click', () => done(false));
+    $('[data-yes]', ask).addEventListener('click', async () => {
+      try {
+        await applyUntimedOrder(date, suggestion);
+        ask.remove();
+        close();
+        toast('已調整沒填時間的順序');
+      } catch (err) {
+        toast(err.message || '無法調整');
+      }
+    });
+  });
+}
+
+window.addEventListener('beforeinstallprompt', (event) => {
+  event.preventDefault();
+  state.installPrompt = event;
+});
+
 async function boot() {
   applyTheme(currentThemeId());
   bindHome();
@@ -3367,11 +3894,15 @@ async function boot() {
     const config = await api('/api/config');
     state.googleClientId = String(config.googleClientId || '').trim();
     state.flightLookup = Boolean(config.flightLookup);
+    state.pushEnabled = Boolean(config.pushEnabled);
     if (state.googleClientId) loadGisScript().catch(() => {});
   } catch (_) {
     state.googleClientId = '';
     state.flightLookup = false;
+    state.pushEnabled = false;
   }
+  registerAppShell();
+  bindOfflineBanner();
   if (state.tripId && state.memberId) {
     try {
       const data = await api(`/api/trips/${state.tripId}`);

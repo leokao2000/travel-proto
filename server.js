@@ -184,7 +184,79 @@ app.get('/api/config', (_req, res) => {
   res.json({
     googleClientId: String(process.env.GOOGLE_OAUTH_CLIENT_ID || '').trim(),
     flightLookup: Boolean(String(process.env.FLIGHT_API_KEY || '').trim()),
+    pushEnabled: Boolean(String(process.env.VAPID_PUBLIC_KEY || '').trim() && String(process.env.VAPID_PRIVATE_KEY || '').trim()),
   });
+});
+
+const GEO_FILE = path.join(DATA_DIR, 'geocode-cache.json');
+let geoLock = Promise.resolve();
+
+function readGeoCache() {
+  try {
+    return JSON.parse(fs.readFileSync(GEO_FILE, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+function writeGeoCache(cache) {
+  ensureData();
+  fs.writeFileSync(GEO_FILE, JSON.stringify(cache));
+}
+
+function withGeoSlot(fn) {
+  const run = geoLock.then(fn, fn);
+  geoLock = run.then(
+    () => new Promise((resolve) => setTimeout(resolve, 1100)),
+    () => new Promise((resolve) => setTimeout(resolve, 1100)),
+  );
+  return run;
+}
+
+app.get('/api/geocode', async (req, res) => {
+  const query = String(req.query.q || '').trim().replace(/\s+/g, ' ').slice(0, 200);
+  if (!query) return res.status(400).json({ error: '缺少地點' });
+  const key = query.toLowerCase();
+  const cache = readGeoCache();
+  const hit = cache[key];
+  if (hit && Number.isFinite(hit.lat) && Number.isFinite(hit.lng)) {
+    return res.json({ lat: hit.lat, lng: hit.lng, displayName: hit.displayName || query, cached: true });
+  }
+  try {
+    const found = await withGeoSlot(async () => {
+      const again = readGeoCache();
+      if (again[key] && Number.isFinite(again[key].lat)) return again[key];
+      const base = String(process.env.GEOCODE_API_URL || 'https://nominatim.openstreetmap.org/search').trim();
+      const url = `${base}${base.includes('?') ? '&' : '?'}format=jsonv2&limit=1&q=${encodeURIComponent(query)}`;
+      const upstream = await fetch(url, {
+        headers: {
+          'User-Agent': 'LeoPrototype/1.0 (https://travel-proto.onrender.com)',
+          Accept: 'application/json',
+        },
+        signal: AbortSignal.timeout(12000),
+      });
+      const data = await upstream.json().catch(() => []);
+      const place = Array.isArray(data) ? data[0] : null;
+      const lat = Number(place?.lat);
+      const lng = Number(place?.lon ?? place?.lng);
+      if (!upstream.ok || !Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+      const saved = {
+        lat,
+        lng,
+        displayName: String(place.display_name || query).slice(0, 160),
+        fetchedAt: new Date().toISOString(),
+      };
+      const next = readGeoCache();
+      next[key] = saved;
+      writeGeoCache(next);
+      return saved;
+    });
+    if (!found) return res.status(404).json({ error: '找不到這個地點' });
+    res.json({ lat: found.lat, lng: found.lng, displayName: found.displayName || query, cached: false });
+  } catch (err) {
+    console.error('geocode failed', err?.name || 'error');
+    res.status(502).json({ error: '暫時無法查詢地點' });
+  }
 });
 
 app.get('/api/flight', async (req, res) => {

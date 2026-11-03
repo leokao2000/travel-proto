@@ -12,7 +12,7 @@ npm install
 npm start
 ```
 
-環境變數：`PORT`、`DATA_DIR`（可選）、`GOOGLE_OAUTH_CLIENT_ID`（選用，Google Drive 備份）、`FLIGHT_API_KEY`（選用，航班查詢）。
+環境變數：`PORT`、`DATA_DIR`（可選）、`GOOGLE_OAUTH_CLIENT_ID`（選用，Google Drive 備份）、`FLIGHT_API_KEY`（選用，航班查詢）、`VAPID_PUBLIC_KEY` 與 `VAPID_PRIVATE_KEY`（選用，推播尚未啟用）。
 
 ## 設定 Google Drive 備份
 
@@ -47,3 +47,17 @@ npm start
 3. 部署完成後，行程裡的「查詢航班」才會亮起。查詢只補上還空著的機場與時間，不會蓋掉你已輸入的航班號碼或日期。
 
 伺服器呼叫 `https://aerodatabox.p.rapidapi.com/flights/number/{航班號碼}/{日期}`，金鑰放在 header，不會寫進 log。本機測試可另設 `FLIGHT_API_URL` 指到自己的假上游，正式環境請留空。
+
+## 地圖
+
+每天和整趟行程可以打開地圖。圖磚用 OpenStreetMap，請保留畫面上的 © OpenStreetMap 出處；這是輕量瀏覽，不要拿來批次下載圖磚。沒有座標的地點會透過 Nominatim 查一次（免費、每秒最多 1 次，User-Agent 為 `LeoPrototype/1.0`），結果存在伺服器快取，也寫回行程資料。點和點之間的時間是直線距離的粗估，標成「約」，不是實際路況。導航只打開 Google 地圖的網址，不會呼叫付費的 Directions API。本機測試可設 `GEOCODE_API_URL` 指到假上游。
+
+## 離線與提醒
+
+這是一個 PWA（名稱 `Leo prototype`）。Service worker 會快取畫面，並用 stale-while-revalidate 留住上次成功讀到的 `GET /api/trips/:id`。離線時看得到那份資料，頂端會顯示「離線中，顯示上次同步的資料」。
+
+離線時不能改行程。存檔是整份覆蓋，若把離線期間的舊內容排進佇列再送出，會蓋掉旅伴在這段時間的更新，所以改成唯讀。
+
+iPhone 請用 Safari 的分享選單「加入主畫面」。Android 若瀏覽器提供安裝提示，更多裡會出現「加到主畫面」。iOS 的本機通知通常要加到主畫面後才比較穩。
+
+明天 09:00 前的交通或航班，會在你打開 App、且已允許通知時，用 Notification API 提醒一次。真正的 Web Push 還沒接上：要同時設定 `VAPID_PUBLIC_KEY` 與 `VAPID_PRIVATE_KEY` 才會把 `/api/config` 的 `pushEnabled` 設成 true，目前沒有這兩個變數時推播維持關閉，也不會送出。可用 `npx web-push generate-vapid-keys` 產生金鑰，貼到 Render 的環境變數後再部署。不要把私鑰寫進 git。
