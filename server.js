@@ -17,7 +17,7 @@ const id = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 10);
 
 app.use((req, res, next) => {
   const big = req.method === 'POST' && /\/(import|restore)$/.test(req.path);
-  return express.json({ limit: big ? '16mb' : '1mb' })(req, res, next);
+  return express.json({ limit: big ? '16mb' : '4mb' })(req, res, next);
 });
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -113,8 +113,67 @@ function publicTrip(trip) {
     lodgings: asList(trip.lodgings),
     transports: asList(trip.transports),
     expenses: trip.expenses || [],
+    flights: sanitizeFlights(trip.flights),
     updatedAt: trip.updatedAt,
   };
+}
+
+function sanitizeLeg(leg) {
+  const src = leg && typeof leg === 'object' ? leg : {};
+  const date = String(src.date || '');
+  const time = (value) => /^\d{2}:\d{2}$/.test(String(value || '')) ? String(value) : '';
+  return {
+    number: String(src.number || '').trim().toUpperCase().slice(0, 8),
+    date: /^\d{4}-\d{2}-\d{2}/.test(date) ? date.slice(0, 10) : '',
+    from: String(src.from || '').trim().slice(0, 20),
+    to: String(src.to || '').trim().slice(0, 20),
+    depart: time(src.depart),
+    arrive: time(src.arrive),
+  };
+}
+
+function sanitizeFlights(flights) {
+  const src = flights && typeof flights === 'object' ? flights : {};
+  return { outbound: sanitizeLeg(src.outbound), inbound: sanitizeLeg(src.inbound) };
+}
+
+function countryImageError(countries) {
+  let total = 0;
+  for (const country of countries || []) {
+    const slots = Array.isArray(country?.patterns) ? country.patterns : [];
+    for (const slot of slots) {
+      if (slot?.kind !== 'image' || typeof slot.data !== 'string') continue;
+      if (!slot.data.startsWith('data:image/') || slot.data.length > 45000) return '單張圖案請小於 30KB';
+      total += slot.data.length;
+    }
+  }
+  if (total > 800000) return '圖案總量太大';
+  return '';
+}
+
+function sanitizePatterns(patterns) {
+  if (!Array.isArray(patterns)) return undefined;
+  return patterns.slice(0, 3).map((slot) => {
+    if (!slot || typeof slot !== 'object') return null;
+    if (slot.kind === 'builtin' && /^[A-Z_]{1,8}$/.test(String(slot.id || ''))) return { kind: 'builtin', id: slot.id };
+    if (slot.kind === 'emoji') {
+      const text = String(slot.text || '').trim().slice(0, 8);
+      return text ? { kind: 'emoji', text } : null;
+    }
+    if (slot.kind === 'image' && typeof slot.data === 'string' && slot.data.startsWith('data:image/') && slot.data.length <= 45000) {
+      return { kind: 'image', data: slot.data };
+    }
+    return null;
+  });
+}
+
+function sanitizeCountries(list) {
+  return asList(list).map((country) => {
+    if (!country || typeof country !== 'object') return country;
+    const next = { ...country };
+    if ('patterns' in country) next.patterns = sanitizePatterns(country.patterns);
+    return next;
+  });
 }
 
 app.get('/api/health', (_req, res) => {
@@ -122,7 +181,55 @@ app.get('/api/health', (_req, res) => {
 });
 
 app.get('/api/config', (_req, res) => {
-  res.json({ googleClientId: String(process.env.GOOGLE_OAUTH_CLIENT_ID || '').trim() });
+  res.json({
+    googleClientId: String(process.env.GOOGLE_OAUTH_CLIENT_ID || '').trim(),
+    flightLookup: Boolean(String(process.env.FLIGHT_API_KEY || '').trim()),
+  });
+});
+
+app.get('/api/flight', async (req, res) => {
+  const key = String(process.env.FLIGHT_API_KEY || '').trim();
+  if (!key) return res.json({ enabled: false });
+  const number = String(req.query.number || '').trim().toUpperCase().replace(/\s+/g, '');
+  const date = String(req.query.date || '').trim().slice(0, 10);
+  if (!/^[A-Z0-9]{2,8}$/.test(number) || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return res.status(400).json({ enabled: true, error: '請填正確的航班號碼與日期' });
+  }
+  const custom = String(process.env.FLIGHT_API_URL || '').trim();
+  const url = custom
+    ? `${custom}${custom.includes('?') ? '&' : '?'}number=${encodeURIComponent(number)}&date=${encodeURIComponent(date)}`
+    : `https://aerodatabox.p.rapidapi.com/flights/number/${encodeURIComponent(number)}/${date}`;
+  const headers = custom
+    ? { 'X-Api-Key': key }
+    : { 'X-RapidAPI-Key': key, 'X-RapidAPI-Host': 'aerodatabox.p.rapidapi.com' };
+  try {
+    const upstream = await fetch(url, { headers, signal: AbortSignal.timeout(15000) });
+    const data = await upstream.json().catch(() => null);
+    if (!upstream.ok) {
+      console.error('flight lookup', upstream.status);
+      return res.status(502).json({ enabled: true, error: '查詢航班失敗' });
+    }
+    const flight = Array.isArray(data) ? data[0] : (data?.data?.[0] || null);
+    if (!flight) return res.json({ enabled: true, found: false });
+    const dep = flight.departure || {};
+    const arr = flight.arrival || {};
+    const clock = (node) => {
+      const raw = node.scheduledTimeLocal || node.scheduledTime?.local || node.scheduled || '';
+      const match = String(raw).match(/(?:T|\s|^)(\d{2}:\d{2})/);
+      return match ? match[1] : '';
+    };
+    res.json({
+      enabled: true,
+      found: true,
+      from: dep.airport?.iata || dep.iata || '',
+      to: arr.airport?.iata || arr.iata || '',
+      depart: clock(dep),
+      arrive: clock(arr),
+    });
+  } catch (err) {
+    console.error('flight lookup failed', err?.name || 'error');
+    res.status(502).json({ enabled: true, error: '查詢航班失敗' });
+  }
 });
 
 app.get('/api/meta', (_req, res) => {
@@ -232,6 +339,7 @@ function sanitizeBackupTrip(raw) {
       lodgings: asList(raw.lodgings),
       transports: asList(raw.transports),
       expenses: asList(raw.expenses),
+      flights: sanitizeFlights(raw.flights),
       createdAt: raw.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     },
@@ -246,6 +354,9 @@ app.post('/api/trips/restore', (req, res) => {
   const db = readDb();
   const existing = db.trips[incoming.id];
   const codeOwner = Object.values(db.trips).find((trip) => String(trip.code || '').toUpperCase() === incoming.code && trip.id !== incoming.id);
+  const imageError = countryImageError(incoming.countries);
+  if (imageError) return res.status(400).json({ error: imageError });
+  incoming.countries = sanitizeCountries(incoming.countries);
   if (codeOwner) return res.status(409).json({ error: '邀請碼已被其他旅行使用' });
   if (existing && req.body?.confirm !== true) {
     return res.status(409).json({ error: '這份備份會覆寫目前的旅行，請再確認一次', needsConfirm: true });
@@ -270,7 +381,12 @@ app.put('/api/trips/:tripId', (req, res) => {
     return res.status(403).json({ error: '無效的成員' });
   }
   if (body.title != null) trip.title = String(body.title).slice(0, 80);
-  if (Array.isArray(body.countries)) trip.countries = body.countries;
+  if (Array.isArray(body.countries)) {
+    const imageError = countryImageError(body.countries);
+    if (imageError) return res.status(400).json({ error: imageError });
+    trip.countries = sanitizeCountries(body.countries);
+  }
+  if (body.flights && typeof body.flights === 'object') trip.flights = sanitizeFlights(body.flights);
   if (body.days && typeof body.days === 'object') trip.days = body.days;
   if (Array.isArray(body.restaurants)) trip.restaurants = body.restaurants;
   if (Array.isArray(body.lodgings)) trip.lodgings = body.lodgings;

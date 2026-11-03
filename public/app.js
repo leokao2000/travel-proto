@@ -54,6 +54,8 @@ const state = {
   placesEnabled: null,
   placesStatusPending: false,
   placeReviews: {},
+  expandedReviews: new Set(),
+  flightLookup: false,
 };
 
 const $ = (sel, el = document) => el.querySelector(sel);
@@ -217,10 +219,193 @@ function weekday(dateStr) {
   return names[new Date(dateStr + 'T12:00:00').getDay()];
 }
 
+function emptyFlights() {
+  const leg = () => ({ number: '', date: '', from: '', to: '', depart: '', arrive: '' });
+  return { outbound: leg(), inbound: leg() };
+}
+
+const PATTERN_EMOJIS = ['🌸','🗻','🏯','🗼','🗽','🏰','🌉','🚢','🚋','🏔️','🦘','🥝','🐼','🐉','🍜','🍣','🏖️','✈️','🗺️','🧳','🌏'];
+const TIMEZONES = [
+  ['Asia/Taipei', '台北'],
+  ['Asia/Tokyo', '東京'],
+  ['Asia/Seoul', '首爾'],
+  ['Asia/Hong_Kong', '香港'],
+  ['Asia/Shanghai', '上海'],
+  ['Asia/Bangkok', '曼谷'],
+  ['Asia/Kolkata', '印度'],
+  ['Australia/Sydney', '雪梨'],
+  ['Australia/Perth', '伯斯'],
+  ['Pacific/Auckland', '奧克蘭'],
+  ['Europe/Paris', '巴黎'],
+  ['Europe/London', '倫敦'],
+  ['Europe/Berlin', '柏林'],
+  ['Europe/Zurich', '蘇黎世'],
+  ['America/New_York', '紐約'],
+  ['America/Los_Angeles', '洛杉磯'],
+  ['UTC', 'UTC'],
+];
+const PATTERN_SLOTS = ['國家卡片', '每日小圖', '背景浮水印'];
+
 function countrySvg(code, size) {
   const cls = size === 'sm' ? 'country-art sm' : size === 'bg' ? 'country-art watermark' : 'country-art';
   const body = COUNTRY_MARKS[code] || COUNTRY_MARKS._;
   return `<svg class="${cls}" viewBox="0 0 64 48" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`;
+}
+
+function patternSlots(country) {
+  const list = Array.isArray(country?.patterns) ? country.patterns : [];
+  return [0, 1, 2].map((index) => list[index] || null);
+}
+
+function renderPattern(country, index, size) {
+  const slot = patternSlots(country)[index];
+  const sizeCls = size === 'sm' ? 'sm' : size === 'bg' ? 'watermark' : '';
+  const cls = `country-art${sizeCls ? ` ${sizeCls}` : ''}`;
+  if (slot?.kind === 'image' && String(slot.data || '').startsWith('data:image/')) {
+    return `<img class="${cls}" src="${escapeHtml(slot.data)}" alt="" />`;
+  }
+  if (slot?.kind === 'emoji' && slot.text) {
+    return `<span class="${cls} country-emoji" aria-hidden="true">${escapeHtml(slot.text)}</span>`;
+  }
+  const code = slot?.kind === 'builtin' && slot.id ? slot.id : country?.code;
+  return countrySvg(code, size);
+}
+
+const PATTERN_MARKS = [
+  ['TW', '台灣'], ['JP', '日本'], ['KR', '韓國'], ['HK', '香港'], ['CN', '中國'],
+  ['AU', '澳洲'], ['NZ', '紐西蘭'], ['FR', '法國'], ['DE', '德國'], ['CH', '瑞士'],
+  ['_', '地球'],
+];
+
+function countryKey(country) {
+  const list = state.trip?.countries || [];
+  const index = Math.max(0, list.indexOf(country));
+  if (country?.id) return `id:${country.id}`;
+  return `legacy:${index}:${country?.code || ''}:${calendarDate(country?.start)}:${calendarDate(country?.end)}`;
+}
+
+function countryByKey(key) {
+  return (state.trip?.countries || []).find((country) => countryKey(country) === key) || null;
+}
+
+function groupConsecutive(days) {
+  const ranges = [];
+  for (const day of [...new Set(days)].filter(Boolean).sort()) {
+    const last = ranges[ranges.length - 1];
+    if (last && shiftDate(last[1], 1) === day) last[1] = day;
+    else ranges.push([day, day]);
+  }
+  return ranges;
+}
+
+function presetByCode(code, source) {
+  const known = COUNTRY_PRESETS.find((preset) => preset.code === code);
+  if (known) return known;
+  if (source && (source.code || '_') === (code || '_')) {
+    return { name: source.name || '其他', code: source.code || '_', tz: source.tz || 'UTC', currency: source.currency || 'TWD' };
+  }
+  return { name: '其他', code: code || '_', tz: 'UTC', currency: 'TWD' };
+}
+
+function cleanPatterns(slots) {
+  const next = [0, 1, 2].map((index) => {
+    const slot = slots?.[index];
+    if (!slot || typeof slot !== 'object') return null;
+    if (slot.kind === 'builtin' && COUNTRY_MARKS[slot.id]) return { kind: 'builtin', id: slot.id };
+    const text = String(slot.text || '').trim().slice(0, 8);
+    if (slot.kind === 'emoji' && text) return { kind: 'emoji', text };
+    if (slot.kind === 'image' && String(slot.data || '').startsWith('data:image/') && slot.data.length <= 45000) {
+      return { kind: 'image', data: slot.data };
+    }
+    return null;
+  });
+  return next.some(Boolean) ? next : undefined;
+}
+
+function applyDayCountry(targetDates, preset, tz, patterns) {
+  const dateSet = new Set(targetDates.map(calendarDate).filter(Boolean));
+  const countries = (state.trip.countries || []).flatMap((country) => {
+    const covered = eachDate(calendarDate(country.start), calendarDate(country.end));
+    if (!covered.some((day) => dateSet.has(day))) return [{ ...country, id: country.id || uid() }];
+    const remain = covered.filter((day) => !dateSet.has(day));
+    return groupConsecutive(remain).map(([start, end], index) => ({
+      ...country,
+      id: index === 0 && country.id ? country.id : uid(),
+      start,
+      end,
+    }));
+  });
+  const cleaned = cleanPatterns(patterns);
+  for (const [start, end] of groupConsecutive([...dateSet])) {
+    const record = {
+      id: uid(),
+      name: preset.name,
+      code: preset.code,
+      tz,
+      currency: preset.currency,
+      start,
+      end,
+    };
+    if (cleaned) record.patterns = cleaned;
+    countries.push(record);
+  }
+  countries.sort((a, b) => String(a.start).localeCompare(String(b.start)) || String(a.name).localeCompare(String(b.name), 'zh-Hant'));
+  return countries;
+}
+
+function legSummary(leg) {
+  if (!leg) return '尚未填寫';
+  const parts = [];
+  if (leg.number) parts.push(leg.number);
+  if (leg.date) parts.push(leg.date);
+  if (leg.from || leg.to) parts.push(`${leg.from || '—'} → ${leg.to || '—'}`);
+  if (leg.depart || leg.arrive) parts.push(`${leg.depart || '—'} 起飛 · ${leg.arrive || '—'} 抵達`);
+  return parts.length ? parts.join(' · ') : '尚未填寫';
+}
+
+function loadImageElement(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(img);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('無法讀取這張圖片'));
+    };
+    img.src = url;
+  });
+}
+
+async function fileToPatternData(file) {
+  if (!file) throw new Error('請選擇圖片');
+  const type = String(file.type || '');
+  if (/heic|heif/i.test(type) || /\.heic$/i.test(file.name || '')) throw new Error('請先把照片轉成 JPEG 再上傳');
+  if (type && !type.startsWith('image/')) throw new Error('請選擇圖片');
+  const img = await loadImageElement(file);
+  const canvas = document.createElement('canvas');
+  canvas.width = 128;
+  canvas.height = 128;
+  const ctx = canvas.getContext('2d');
+  const scale = Math.max(128 / img.width, 128 / img.height);
+  const width = img.width * scale;
+  const height = img.height * scale;
+  ctx.drawImage(img, (128 - width) / 2, (128 - height) / 2, width, height);
+  let mime = 'image/webp';
+  let quality = 0.72;
+  let url = canvas.toDataURL(mime, quality);
+  if (!url.startsWith('data:image/webp')) {
+    mime = 'image/jpeg';
+    url = canvas.toDataURL(mime, quality);
+  }
+  while (url.length > 40000 && quality > 0.36) {
+    quality -= 0.08;
+    url = canvas.toDataURL(mime, quality);
+  }
+  if (!url.startsWith('data:image/') || url.length > 45000) throw new Error('單張圖案請小於 30KB');
+  return url;
 }
 
 function mapHref(place) {
@@ -289,18 +474,41 @@ function placesCardHtml(entry, query, kind) {
     ? `${Number(chosen.userRatingCount).toLocaleString('zh-TW')} 則評價`
     : '';
   const pickLabel = many ? (chosen ? '更換分店' : `選擇分店（${match.candidates.length}）`) : '';
+  const reviewKey = `${kind}:${entry.id}`;
+  const reviewsOpen = state.expandedReviews.has(reviewKey);
+  const summary = [stars, countLabel].filter(Boolean).join(' · ');
+  const reviewBlock = chosen && (stars || countLabel || reviews.length) ? `
+      <div class="place-reviews">
+        <button type="button" class="review-toggle" data-review-toggle="${escapeHtml(reviewKey)}" aria-expanded="${reviewsOpen ? 'true' : 'false'}">
+          <span class="review-toggle-text">${summary ? `${summary} · ` : ''}Google 評論（${reviews.length}）</span>
+          <span class="review-chevron" aria-hidden="true">${reviewsOpen ? '▾' : '▸'}</span>
+        </button>
+        <div class="review-panel"${reviewsOpen ? '' : ' hidden'}>
+          ${reviews.length ? `<ul class="place-snippets">${reviews.map((rev) => `<li>${escapeHtml(rev.text)}${rev.author ? `<span class="muted"> — ${escapeHtml(rev.author)}</span>` : ''}</li>`).join('')}</ul>` : '<div class="muted">沒有可顯示的短評</div>'}
+          <div class="places-attr">評價資料來自 <a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">Google</a></div>
+        </div>
+      </div>
+    ` : '';
   return `
     ${chosen && (chosen.name || chosen.address) ? `<div class="place-branch">${chosen.name ? `<div>${escapeHtml(chosen.name)}</div>` : ''}${chosen.address ? `<div>${escapeHtml(chosen.address)}</div>` : ''}</div>` : ''}
-    ${chosen && (stars || countLabel || reviews.length) ? `
-      <div class="place-reviews">
-        ${stars || countLabel ? `<div class="place-rating">${stars}${stars && countLabel ? ' · ' : ''}${countLabel}</div>` : ''}
-        ${reviews.length ? `<ul class="place-snippets">${reviews.map((rev) => `<li>${escapeHtml(rev.text)}${rev.author ? `<span class="muted"> — ${escapeHtml(rev.author)}</span>` : ''}</li>`).join('')}</ul>` : ''}
-      </div>
-    ` : ''}
-    ${chosen ? `<div class="places-attr">評價資料來自 <a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">Google</a></div>` : ''}
+    ${reviewBlock}
     ${pickLabel ? `<button type="button" class="branch-pick" data-pick-branch="${escapeHtml(entry.id)}" data-branch-kind="${kind}">${pickLabel}</button>` : ''}
     <a class="reviews-link" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">看 Google 評價</a>
   `;
+}
+
+function bindReviewToggles(root) {
+  $$('[data-review-toggle]', root).forEach((button) => button.addEventListener('click', () => {
+    const key = button.dataset.reviewToggle;
+    const open = !state.expandedReviews.has(key);
+    if (open) state.expandedReviews.add(key);
+    else state.expandedReviews.delete(key);
+    button.setAttribute('aria-expanded', open ? 'true' : 'false');
+    const chevron = button.querySelector('.review-chevron');
+    if (chevron) chevron.textContent = open ? '▾' : '▸';
+    const panel = button.parentElement?.querySelector('.review-panel');
+    if (panel) panel.hidden = !open;
+  }));
 }
 
 function keptPlaceId(item, fields) {
@@ -409,6 +617,16 @@ function normalizeTrip(trip) {
   trip.restaurants = Array.isArray(trip.restaurants) ? trip.restaurants : [];
   trip.lodgings = Array.isArray(trip.lodgings) ? trip.lodgings : [];
   trip.transports = Array.isArray(trip.transports) ? trip.transports : [];
+  const rawFlights = trip.flights && typeof trip.flights === 'object' ? trip.flights : {};
+  const leg = (value) => ({
+    number: value?.number || '',
+    date: value?.date || '',
+    from: value?.from || '',
+    to: value?.to || '',
+    depart: value?.depart || '',
+    arrive: value?.arrive || '',
+  });
+  trip.flights = { outbound: leg(rawFlights.outbound), inbound: leg(rawFlights.inbound) };
   const days = trip.days && typeof trip.days === 'object' ? trip.days : {};
   for (const key of Object.keys(days)) {
     if (!Array.isArray(days[key])) days[key] = [];
@@ -457,21 +675,28 @@ function persistSession() {
   if (state.memberId) localStorage.setItem('tp_memberId', state.memberId);
 }
 
-async function saveTrip(patch) {
-  if (!state.trip) return;
-  const body = {
-    memberId: state.memberId,
-    title: patch.title ?? state.trip.title,
-    countries: patch.countries ?? state.trip.countries,
-    days: patch.days ?? state.trip.days,
-    expenses: patch.expenses ?? state.trip.expenses,
-    restaurants: patch.restaurants ?? state.trip.restaurants ?? [],
-    lodgings: patch.lodgings ?? state.trip.lodgings ?? [],
-    transports: patch.transports ?? state.trip.transports ?? [],
+let saveChain = Promise.resolve();
+
+function saveTrip(patch) {
+  const run = async () => {
+    if (!state.trip) return;
+    const body = {
+      memberId: state.memberId,
+      title: patch.title ?? state.trip.title,
+      countries: patch.countries ?? state.trip.countries,
+      days: patch.days ?? state.trip.days,
+      expenses: patch.expenses ?? state.trip.expenses,
+      restaurants: patch.restaurants ?? state.trip.restaurants ?? [],
+      lodgings: patch.lodgings ?? state.trip.lodgings ?? [],
+      transports: patch.transports ?? state.trip.transports ?? [],
+      flights: patch.flights ?? state.trip.flights ?? emptyFlights(),
+    };
+    const data = await api(`/api/trips/${state.trip.id}`, { method: 'PUT', body: JSON.stringify(body) });
+    adoptTrip(data.trip);
+    render();
   };
-  const data = await api(`/api/trips/${state.trip.id}`, { method: 'PUT', body: JSON.stringify(body) });
-  adoptTrip(data.trip);
-  render();
+  saveChain = saveChain.then(run, run);
+  return saveChain;
 }
 
 function startPolling() {
@@ -654,6 +879,10 @@ function renderTimeline() {
   const counts = blockCounts(trip);
   const reviewQueries = [];
   const reviewEntries = [];
+  const countryNames = [...new Set((trip.countries || []).map((c) => c.name).filter(Boolean))];
+  const planningSummary = countryNames.length ? countryNames.join('、') : '尚未加入國家';
+  const planningOpen = state.expandedReviews.has('planning');
+  const flights = trip.flights || emptyFlights();
   el.innerHTML = `
     <div class="card">
       <div class="row" style="align-items:flex-start">
@@ -664,30 +893,46 @@ function renderTimeline() {
         <button class="secondary" id="btn-copy-code" type="button">複製</button>
       </div>
       <div class="muted" style="margin-top:0.5rem">成員：${trip.members.map((m) => escapeHtml(m.nickname)).join('、')}</div>
-      <div style="margin-top:0.7rem"><button class="secondary" id="btn-import" type="button">匯入行程</button></div>
-    </div>
-    <div class="card">
-      <div class="row">
-        <h2 style="margin:0;flex:1">國家與時區</h2>
-        <button type="button" id="btn-add-country">新增國家</button>
+      <div class="invite-actions">
+        <button class="secondary" id="btn-import" type="button">匯入行程</button>
+        <button class="secondary" id="btn-save-device-timeline" type="button">💾 儲存備份</button>
       </div>
-      <div class="muted" style="margin:0.4rem 0 0.6rem">同一趟旅行可跨多國；日期依序展開成時間軸。</div>
-      ${(trip.countries || []).map((c, idx) => `
-        <div class="country-card" data-idx="${idx}">
-          ${countrySvg(c.code)}
-          <div class="country-copy">
-            <div class="day-head">
-              <strong>${escapeHtml(c.name)}</strong>
-              <span>
-                <button class="ghost" data-add-stay-country="${idx}" type="button">住宿</button>
-                <button class="ghost" data-remove-country="${idx}" type="button">移除</button>
-              </span>
+    </div>
+    <div class="card" id="planning-card">
+      <button type="button" class="review-toggle" data-review-toggle="planning" aria-expanded="${planningOpen ? 'true' : 'false'}">
+        <span class="review-toggle-text">國家與時區 · ${escapeHtml(planningSummary)}</span>
+        <span class="review-chevron" aria-hidden="true">${planningOpen ? '▾' : '▸'}</span>
+      </button>
+      <div class="review-panel" id="planning-panel"${planningOpen ? '' : ' hidden'}>
+        <div class="muted">同一趟旅行可跨多國；日期依序展開成時間軸。</div>
+        ${(trip.countries || []).map((c, idx) => `
+          <div class="country-card" data-idx="${idx}">
+            ${renderPattern(c, 0)}
+            <div class="country-copy">
+              <div class="day-head">
+                <strong>${escapeHtml(c.name)}</strong>
+                <span>
+                  <button class="ghost" data-add-stay-country="${idx}" type="button">住宿</button>
+                  <button class="ghost" data-remove-country="${idx}" type="button">移除</button>
+                </span>
+              </div>
+              <div class="muted">${escapeHtml(c.tz)} · ${escapeHtml(offsetForStay(c.tz, c.start, c.end))}</div>
+              <div class="muted">${c.start || '?'} → ${c.end || '?'} · 幣別 ${c.currency || '—'}</div>
             </div>
-            <div class="muted">${escapeHtml(c.tz)} · ${escapeHtml(offsetForStay(c.tz, c.start, c.end))}</div>
-            <div class="muted">${c.start || '?'} → ${c.end || '?'} · 幣別 ${c.currency || '—'}</div>
+          </div>
+        `).join('') || '<div class="muted">尚未加入國家</div>'}
+        <button type="button" id="btn-add-country">新增國家</button>
+        <div class="flight-block">
+          <div class="flight-line">
+            <div><strong>去程航班</strong><div class="muted">${escapeHtml(legSummary(flights.outbound))}</div></div>
+            <button type="button" class="ghost" data-edit-flight="outbound">編輯</button>
+          </div>
+          <div class="flight-line">
+            <div><strong>回程航班</strong><div class="muted">${escapeHtml(legSummary(flights.inbound))}</div></div>
+            <button type="button" class="ghost" data-edit-flight="inbound">編輯</button>
           </div>
         </div>
-      `).join('') || '<div class="muted">尚未加入國家</div>'}
+      </div>
     </div>
     <div class="card">
       <h2>行程時間軸</h2>
@@ -704,11 +949,11 @@ function renderTimeline() {
         const rides = sortedByTime((trip.transports || []).filter((r) => r.date === date), 'depart');
         return `
           <div class="day">
-            ${countries[0] ? `<div class="day-mark">${countrySvg(countries[0].code, 'bg')}</div>` : ''}
+            ${countries[0] ? `<div class="day-mark">${renderPattern(countries[0], 2, 'bg')}</div>` : ''}
             <div class="day-head">
               <div>
                 <strong>${date}（週${weekday(date)}）</strong>
-                <div>${countries.map((c) => `<span class="chip">${countrySvg(c.code, 'sm')}${escapeHtml(c.name)} ${escapeHtml(offsetLabel(c.tz, date))}</span>`).join(' ')}</div>
+                <div>${countries.map((c) => `<button type="button" class="chip" data-chip-date="${date}" data-country-key="${escapeHtml(countryKey(c))}" aria-label="更改${escapeHtml(c.name)}">${renderPattern(c, 1, 'sm')}${escapeHtml(c.name)} ${escapeHtml(offsetLabel(c.tz, date))}</button>`).join(' ')}</div>
               </div>
               <button class="ghost ${prefs.activity ? '' : 'hidden'}" data-add-act="${date}" type="button">+ 活動</button>
             </div>
@@ -802,6 +1047,7 @@ function renderTimeline() {
   `;
   ensurePlaceReviews(reviewQueries);
   applySingleCandidateContact(reviewEntries);
+  bindReviewToggles(el);
   $$('[data-pick-branch]', el).forEach((btn) => btn.addEventListener('click', () => {
     const kind = btn.dataset.branchKind;
     const entry = kind === 'stay'
@@ -819,6 +1065,18 @@ function renderTimeline() {
     render();
   }));
   $('#btn-import')?.addEventListener('click', () => openImportSheet());
+  $('#btn-save-device-timeline')?.addEventListener('click', async () => {
+    try {
+      await saveDeviceBackup();
+      state.tab = 'more';
+      render();
+      requestAnimationFrame(() => {
+        document.getElementById('backup-card')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    } catch (err) {
+      toast(err.message || '無法存到這台裝置');
+    }
+  });
   $('#btn-copy-code')?.addEventListener('click', async () => {
     try {
       await navigator.clipboard.writeText(trip.code);
@@ -828,6 +1086,11 @@ function renderTimeline() {
     }
   });
   $('#btn-add-country')?.addEventListener('click', openCountryModal);
+  $$('[data-edit-flight]', el).forEach((btn) => btn.addEventListener('click', () => openFlightModal(btn.dataset.editFlight)));
+  $$('[data-country-key]', el).forEach((btn) => btn.addEventListener('click', () => {
+    const country = countryByKey(btn.dataset.countryKey);
+    if (country) openDayCountrySheet(country, btn.dataset.chipDate);
+  }));
   $$('[data-remove-country]', el).forEach((btn) => btn.addEventListener('click', async () => {
     const idx = Number(btn.dataset.removeCountry);
     const countries = trip.countries.slice();
@@ -1019,6 +1282,7 @@ function buildBackup(includePrivate) {
       lodgings: trip.lodgings || [],
       transports: trip.transports || [],
       expenses: trip.expenses || [],
+      flights: trip.flights || emptyFlights(),
       createdAt: trip.createdAt,
       updatedAt: trip.updatedAt,
     },
@@ -1710,7 +1974,8 @@ function reopenLatestDraft() {
   else if (type === 'stay-setup') {
     const country = (trip.countries || []).find((c) => c.id === id) || (trip.countries || [])[0];
     if (country) openLodgingSetup(country);
-  } else if (type === 'import') openImportSheet();
+  } else if (type === 'flight') openFlightModal(id === 'inbound' ? 'inbound' : 'outbound');
+  else if (type === 'import') openImportSheet();
 }
 
 function notifyDrafts() {
@@ -1789,6 +2054,263 @@ function openCountryModal() {
     await saveTrip({ countries });
     openLodgingSetup(country);
   }, { draft: { type: 'country', id: 'new', day: '' } });
+}
+
+function openFlightModal(which) {
+  const key = which === 'inbound' ? 'inbound' : 'outbound';
+  const leg = state.trip?.flights?.[key] || emptyFlights()[key];
+  const title = key === 'inbound' ? '回程航班' : '去程航班';
+  const wrap = openModal(title, `
+    <label>航班號碼</label>
+    <input id="fl-number" maxlength="8" placeholder="例如 CI100" value="${escapeHtml(leg.number || '')}" />
+    <label>日期</label>
+    <input type="date" id="fl-date" value="${escapeHtml(leg.date || '')}" />
+    <label>出發機場</label>
+    <input id="fl-from" maxlength="20" placeholder="例如 TPE" value="${escapeHtml(leg.from || '')}" />
+    <label>抵達機場</label>
+    <input id="fl-to" maxlength="20" placeholder="例如 NRT" value="${escapeHtml(leg.to || '')}" />
+    <label>出發時間</label>
+    <input type="time" id="fl-depart" value="${escapeHtml(leg.depart || '')}" />
+    <label>抵達時間</label>
+    <input type="time" id="fl-arrive" value="${escapeHtml(leg.arrive || '')}" />
+    <div class="actions" style="margin-top:0.6rem">
+      <button type="button" class="secondary" id="btn-flight-lookup" ${state.flightLookup ? '' : 'disabled'}>查詢航班</button>
+    </div>
+    ${state.flightLookup ? '' : '<div class="muted">航班查詢尚未設定，請手動填寫。</div>'}
+  `, async (root) => {
+    const flights = {
+      outbound: { ...(state.trip.flights?.outbound || emptyFlights().outbound) },
+      inbound: { ...(state.trip.flights?.inbound || emptyFlights().inbound) },
+    };
+    flights[key] = {
+      number: $('#fl-number', root).value.trim(),
+      date: $('#fl-date', root).value,
+      from: $('#fl-from', root).value.trim(),
+      to: $('#fl-to', root).value.trim(),
+      depart: $('#fl-depart', root).value,
+      arrive: $('#fl-arrive', root).value,
+    };
+    await saveTrip({ flights });
+  }, { draft: { type: 'flight', id: key, day: '' } });
+  $('#btn-flight-lookup', wrap)?.addEventListener('click', async () => {
+    const button = $('#btn-flight-lookup', wrap);
+    const number = $('#fl-number', wrap).value.trim();
+    const date = $('#fl-date', wrap).value;
+    if (!number || !date) {
+      toast('請先填航班號碼與日期');
+      return;
+    }
+    button.disabled = true;
+    try {
+      const data = await api(`/api/flight?number=${encodeURIComponent(number)}&date=${encodeURIComponent(date)}`);
+      if (data.enabled === false) {
+        toast('航班查詢尚未設定');
+        return;
+      }
+      if (!data.found) {
+        toast('找不到這班航班');
+        return;
+      }
+      const fill = (id, value) => {
+        const input = $(id, wrap);
+        if (!input || !value || String(input.value || '').trim()) return;
+        input.value = value;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      };
+      fill('#fl-from', data.from);
+      fill('#fl-to', data.to);
+      fill('#fl-depart', data.depart);
+      fill('#fl-arrive', data.arrive);
+      toast('已帶入空著的欄位');
+    } catch (err) {
+      toast(err.message || '查詢航班失敗');
+    } finally {
+      button.disabled = !state.flightLookup;
+    }
+  });
+}
+
+function openDayCountrySheet(country, date) {
+  const day = calendarDate(date);
+  const slots = patternSlots(country).map((slot) => (slot ? { ...slot } : null));
+  const days = buildTimelineDays().map(([item]) => item);
+  if (day && !days.includes(day)) days.push(day);
+  const known = COUNTRY_PRESETS.some((preset) => preset.code === country.code);
+  const tzKnown = TIMEZONES.some(([zone]) => zone === country.tz);
+  const wrap = document.createElement('div');
+  wrap.className = 'modal-backdrop';
+  wrap.innerHTML = `
+    <div class="modal">
+      <h3>更改 ${escapeHtml(day || '這一天')}</h3>
+      <div class="muted">目前是${escapeHtml(country.name)} ${escapeHtml(offsetLabel(country.tz, day))}。套用後會拆開日期區間，只改你選的日子。</div>
+      <label>國家</label>
+      <select id="day-code">
+        ${COUNTRY_PRESETS.map((preset) => `<option value="${preset.code}" ${preset.code === country.code ? 'selected' : ''}>${escapeHtml(preset.name)}</option>`).join('')}
+        ${known ? '' : `<option value="${escapeHtml(country.code || '_')}" selected>${escapeHtml(country.name || '其他')}</option>`}
+      </select>
+      <label>時區</label>
+      <select id="day-tz">
+        ${tzKnown ? '' : `<option value="${escapeHtml(country.tz || 'UTC')}">${escapeHtml(country.tz || 'UTC')}</option>`}
+        ${TIMEZONES.map(([zone, label]) => `<option value="${zone}" ${zone === country.tz ? 'selected' : ''}>${escapeHtml(label)}（${escapeHtml(zone)}）</option>`).join('')}
+      </select>
+      <h3 style="margin-top:0.9rem">圖案</h3>
+      <div class="muted">三個位置可以各自上傳圖片，或從圖示庫挑。恢復預設會回到這個國家原本的圖。</div>
+      ${PATTERN_SLOTS.map((label, index) => `
+        <div class="pattern-slot">
+          <div class="pattern-preview">
+            <span data-pattern-preview="${index}"></span>
+            <strong>${label}</strong>
+          </div>
+          <div class="pattern-actions">
+            <label class="file-btn">上傳自己的圖片
+              <input type="file" accept="image/*" data-pattern-file="${index}" hidden />
+            </label>
+            <button type="button" class="secondary" data-open-gallery="${index}" aria-expanded="false">從圖示庫挑選</button>
+            <button type="button" class="ghost" data-reset-pattern="${index}">恢復預設</button>
+          </div>
+          <div class="pattern-gallery" data-gallery="${index}" hidden>
+            <div class="gallery-label">內建圖示</div>
+            ${PATTERN_MARKS.map(([code, name]) => `<button type="button" data-slot="${index}" data-pick-mark="${code}" aria-label="${name}">${countrySvg(code, 'sm')}</button>`).join('')}
+            <div class="gallery-label">符號</div>
+            ${PATTERN_EMOJIS.map((emoji) => `<button type="button" data-slot="${index}" data-pick-emoji="${emoji}" aria-label="${emoji}">${emoji}</button>`).join('')}
+          </div>
+          <label>自己輸入符號（可不填）</label>
+          <input id="pat-emoji-${index}" maxlength="8" placeholder="例如 🌸" value="${slots[index]?.kind === 'emoji' ? escapeHtml(slots[index].text) : ''}" />
+        </div>
+      `).join('')}
+      <div class="scope-block">
+        <label class="scope-choice"><input type="radio" name="day-scope" value="one" checked /> 只改這一天</label>
+        <label class="scope-choice"><input type="radio" name="day-scope" value="some" /> 選擇幾天</label>
+        <div id="day-checks" hidden>
+          ${days.map((item) => `<label class="day-check"><input type="checkbox" data-day-check value="${item}" ${item === day ? 'checked' : ''} /> ${item}（週${weekday(item)}）</label>`).join('')}
+        </div>
+        <label class="scope-choice"><input type="radio" name="day-scope" value="all" /> 全部天數</label>
+      </div>
+      <div class="actions">
+        <button type="button" class="secondary" data-cancel>取消</button>
+        <button type="button" data-apply>套用</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(wrap);
+  let tzTouched = false;
+  const close = () => wrap.remove();
+  const paint = () => {
+    const preview = { code: $('#day-code', wrap).value, patterns: slots.map((slot) => (slot ? { ...slot } : null)) };
+    $$('[data-pattern-preview]', wrap).forEach((el) => {
+      const index = Number(el.dataset.patternPreview);
+      const size = index === 1 ? 'sm' : index === 2 ? 'bg' : undefined;
+      el.innerHTML = renderPattern(preview, index, size);
+    });
+    [0, 1, 2].forEach((index) => {
+      const slot = slots[index];
+      $$(`[data-gallery="${index}"] button`, wrap).forEach((button) => {
+        const on = (slot?.kind === 'builtin' && button.dataset.pickMark === slot.id)
+          || (slot?.kind === 'emoji' && button.dataset.pickEmoji === slot.text);
+        button.classList.toggle('on', Boolean(on));
+      });
+    });
+  };
+  const ensureTz = (zone) => {
+    const select = $('#day-tz', wrap);
+    if (![...select.options].some((option) => option.value === zone)) {
+      const extra = document.createElement('option');
+      extra.value = zone;
+      extra.textContent = zone;
+      select.prepend(extra);
+    }
+    select.value = zone;
+  };
+  paint();
+  wrap.addEventListener('click', (event) => { if (event.target === wrap) close(); });
+  $('[data-cancel]', wrap).addEventListener('click', close);
+  $('#day-tz', wrap).addEventListener('change', () => { tzTouched = true; });
+  $('#day-code', wrap).addEventListener('change', () => {
+    if (!tzTouched) ensureTz(presetByCode($('#day-code', wrap).value, country).tz);
+    paint();
+  });
+  $$('input[name="day-scope"]', wrap).forEach((radio) => radio.addEventListener('change', () => {
+    $('#day-checks', wrap).hidden = wrap.querySelector('input[name="day-scope"]:checked')?.value !== 'some';
+  }));
+  $$('[data-open-gallery]', wrap).forEach((button) => button.addEventListener('click', () => {
+    const gallery = wrap.querySelector(`[data-gallery="${button.dataset.openGallery}"]`);
+    gallery.hidden = !gallery.hidden;
+    button.setAttribute('aria-expanded', gallery.hidden ? 'false' : 'true');
+  }));
+  $$('[data-reset-pattern]', wrap).forEach((button) => button.addEventListener('click', () => {
+    const index = Number(button.dataset.resetPattern);
+    slots[index] = null;
+    const emoji = $(`#pat-emoji-${index}`, wrap);
+    const file = wrap.querySelector(`[data-pattern-file="${index}"]`);
+    if (emoji) emoji.value = '';
+    if (file) file.value = '';
+    paint();
+  }));
+  $$('[data-pattern-file]', wrap).forEach((input) => input.addEventListener('change', async () => {
+    const file = input.files?.[0];
+    const index = Number(input.dataset.patternFile);
+    if (!file) return;
+    try {
+      slots[index] = { kind: 'image', data: await fileToPatternData(file) };
+      const emoji = $(`#pat-emoji-${index}`, wrap);
+      if (emoji) emoji.value = '';
+      paint();
+    } catch (err) {
+      input.value = '';
+      toast(err.message || '無法使用這張圖片');
+    }
+  }));
+  [0, 1, 2].forEach((index) => {
+    $(`#pat-emoji-${index}`, wrap)?.addEventListener('input', (event) => {
+      const text = event.target.value.trim().slice(0, 8);
+      if (text) slots[index] = { kind: 'emoji', text };
+      else if (slots[index]?.kind === 'emoji') slots[index] = null;
+      paint();
+    });
+  });
+  wrap.addEventListener('click', (event) => {
+    const mark = event.target.closest('[data-pick-mark]');
+    const emoji = event.target.closest('[data-pick-emoji]');
+    const button = mark || emoji;
+    if (!button || !wrap.contains(button)) return;
+    const index = Number(button.dataset.slot);
+    if (mark) slots[index] = { kind: 'builtin', id: mark.dataset.pickMark };
+    else slots[index] = { kind: 'emoji', text: emoji.dataset.pickEmoji };
+    const field = $(`#pat-emoji-${index}`, wrap);
+    if (field) field.value = emoji ? emoji.dataset.pickEmoji : '';
+    paint();
+  });
+  $('[data-apply]', wrap).addEventListener('click', async () => {
+    const button = $('[data-apply]', wrap);
+    const scope = wrap.querySelector('input[name="day-scope"]:checked')?.value || 'one';
+    const preset = presetByCode($('#day-code', wrap).value, country);
+    const tz = $('#day-tz', wrap).value || preset.tz;
+    let dates = [day];
+    if (scope === 'some') {
+      dates = $$('[data-day-check]:checked', wrap).map((input) => input.value);
+      if (!dates.length) {
+        toast('請至少選一天');
+        return;
+      }
+    } else if (scope === 'all') {
+      dates = buildTimelineDays().map(([item]) => item);
+      if (!dates.length) {
+        toast('這趟行程還沒有日期');
+        return;
+      }
+      const ok = await askYesNo(`要把這趟行程的每一天都改成「${preset.name}」嗎？`, { title: '全部天數', yes: '全部更改', no: '取消' });
+      if (!ok) return;
+    }
+    button.disabled = true;
+    try {
+      const countries = applyDayCountry(dates, preset, tz, slots);
+      await saveTrip({ countries });
+      close();
+    } catch (err) {
+      button.disabled = false;
+      toast(err.message || '無法儲存');
+    }
+  });
 }
 
 function readStayFields(wrap) {
@@ -2627,9 +3149,11 @@ async function boot() {
   try {
     const config = await api('/api/config');
     state.googleClientId = String(config.googleClientId || '').trim();
+    state.flightLookup = Boolean(config.flightLookup);
     if (state.googleClientId) loadGisScript().catch(() => {});
   } catch (_) {
     state.googleClientId = '';
+    state.flightLookup = false;
   }
   if (state.tripId && state.memberId) {
     try {

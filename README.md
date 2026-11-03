@@ -12,7 +12,7 @@ npm install
 npm start
 ```
 
-環境變數：`PORT`、`DATA_DIR`（可選）、`GOOGLE_OAUTH_CLIENT_ID`（選用，Google Drive 備份）。
+環境變數：`PORT`、`DATA_DIR`（可選）、`GOOGLE_OAUTH_CLIENT_ID`（選用，Google Drive 備份）、`FLIGHT_API_KEY`（選用，航班查詢）。
 
 ## 設定 Google Drive 備份
 
@@ -33,3 +33,17 @@ npm start
 7. 在 Render 這個 Web Service 的環境變數新增 `GOOGLE_OAUTH_CLIENT_ID`，值貼上該用戶端編號，然後重新部署。
 
 存取權杖只留在瀏覽器記憶體，不會寫進伺服器或 localStorage。備份會放在雲端硬碟資料夾「Leo prototype 備份」。
+
+## 航班查詢（選用）
+
+去程、回程可以完全手動填。沒有設定金鑰時，「查詢航班」會停用，行程仍可儲存。
+
+目前沒有可靠、免金鑰、能查未來班表的公開 API。OpenSky 只有當下的 ADS-B 航跡，沒有時刻表。Aviationstack 免費方案（每月 100 次、個人非商用）只有即時航班；未來班表要付費（Basic 約每月 49.99 美元，年繳約 44.99 美元；Professional 約 149.99 美元；Business 約 499.99 美元）。FlightAware AeroAPI 沒有真正的免費額度，班表最長約一年，即時狀態大約只到出發前兩天。
+
+因此查詢預設走 AeroDataBox（RapidAPI）。2026 年 11 月官網價目：Basic 免費方案每月約 400 個 API units、每秒 1 次，未來班表最長約 365 天，但仍然要一把 API 金鑰。直接訂閱的 Starter / Growth / Scale 約為每月 19 / 99 / 499 美元。API.Market 的 Pro 約 7.50 美元，RapidAPI 的 Pro 約 8 美元。額度與價格會變，以供應商頁面為準。
+
+1. 到 [AeroDataBox on RapidAPI](https://rapidapi.com/aedbx-aedbx/api/aerodatabox) 訂閱 Basic（或更高方案），複製 API Key。不要把金鑰寫進程式或提交到 git。
+2. 在 Render 新增環境變數 `FLIGHT_API_KEY`，值貼上該金鑰，然後重新部署。
+3. 部署完成後，行程裡的「查詢航班」才會亮起。查詢只補上還空著的機場與時間，不會蓋掉你已輸入的航班號碼或日期。
+
+伺服器呼叫 `https://aerodatabox.p.rapidapi.com/flights/number/{航班號碼}/{日期}`，金鑰放在 header，不會寫進 log。本機測試可另設 `FLIGHT_API_URL` 指到自己的假上游，正式環境請留空。
