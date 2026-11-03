@@ -496,15 +496,145 @@ function clipText(value, max) {
   return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
 }
 
-function clipDate(value) {
-  const s = clipText(value, 10);
-  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : '';
+function taipeiToday() {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Taipei',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date());
+  const get = (type) => parts.find((part) => part.type === type)?.value || '';
+  return `${get('year')}-${get('month')}-${get('day')}`;
 }
 
-function clipTime(value) {
-  const s = clipText(value, 8);
-  const match = s.match(/^(\d{2}):(\d{2})/);
-  return match ? `${match[1]}:${match[2]}` : '';
+function normalizeLooseText(value) {
+  return String(value || '')
+    .replace(/[０-９]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
+    .replace(/[／]/g, '/')
+    .replace(/[：]/g, ':')
+    .replace(/[－–—]/g, '-');
+}
+
+function isoDate(year, month, day) {
+  if (!year || month < 1 || month > 12 || day < 1 || day > 31) return '';
+  const dt = new Date(Date.UTC(year, month - 1, day));
+  if (dt.getUTCFullYear() !== year || dt.getUTCMonth() !== month - 1 || dt.getUTCDate() !== day) return '';
+  return dt.toISOString().slice(0, 10);
+}
+
+function tripDateBounds(trip) {
+  const dates = [];
+  const push = (value) => {
+    const match = String(value || '').match(/^(\d{4}-\d{2}-\d{2})/);
+    if (match) dates.push(match[1]);
+  };
+  for (const country of trip?.countries || []) {
+    push(country.start);
+    push(country.end);
+  }
+  for (const lodging of trip?.lodgings || []) {
+    push(lodging.checkIn);
+    push(lodging.checkOut);
+  }
+  for (const restaurant of trip?.restaurants || []) push(restaurant.date);
+  for (const ride of trip?.transports || []) push(ride.date);
+  for (const [day, list] of Object.entries(trip?.days || {})) {
+    if (Array.isArray(list) && list.length) push(day);
+  }
+  push(trip?.flights?.outbound?.date);
+  push(trip?.flights?.inbound?.date);
+  dates.sort();
+  return dates.length ? { min: dates[0], max: dates[dates.length - 1] } : null;
+}
+
+function daysApart(a, b) {
+  const [ay, am, ad] = a.split('-').map(Number);
+  const [by, bm, bd] = b.split('-').map(Number);
+  return Math.abs(Date.UTC(ay, am - 1, ad) - Date.UTC(by, bm - 1, bd)) / 86400000;
+}
+
+function inferYearlessDate(month, day, trip, today) {
+  const bounds = tripDateBounds(trip);
+  if (bounds) {
+    const startYear = Number(bounds.min.slice(0, 4)) - 1;
+    const endYear = Number(bounds.max.slice(0, 4)) + 1;
+    const candidates = [];
+    for (let year = startYear; year <= endYear; year += 1) {
+      const iso = isoDate(year, month, day);
+      if (iso) candidates.push(iso);
+    }
+    const inside = candidates.filter((iso) => iso >= bounds.min && iso <= bounds.max);
+    if (inside.length) return inside[0];
+    candidates.sort((a, b) => {
+      const da = a < bounds.min ? daysApart(a, bounds.min) : daysApart(bounds.max, a);
+      const db = b < bounds.min ? daysApart(b, bounds.min) : daysApart(bounds.max, b);
+      return da - db || a.localeCompare(b);
+    });
+    return candidates[0] || '';
+  }
+  const year = Number(String(today || taipeiToday()).slice(0, 4));
+  const thisYear = isoDate(year, month, day);
+  if (thisYear && thisYear >= (today || taipeiToday())) return thisYear;
+  return isoDate(year + 1, month, day);
+}
+
+function stripWeekdayWords(value) {
+  return value
+    .replace(/[（(][^）)]*(?:星期|週|周|禮拜)[^）)]*[）)]/g, ' ')
+    .replace(/(?:星期|週|周|禮拜)[一二三四五六日天]/g, ' ')
+    .replace(/[（(]\s*[一二三四五六日天]\s*[）)]/g, ' ');
+}
+
+function parseLooseDate(value, trip, today) {
+  const original = clipText(value, 40);
+  if (!original) return { iso: '', raw: '' };
+  const core = stripWeekdayWords(normalizeLooseText(original));
+  const full = core.match(/(\d{4})\s*[年/\-.]\s*(\d{1,2})\s*[月/\-.]\s*(\d{1,2})/);
+  if (full) {
+    const iso = isoDate(Number(full[1]), Number(full[2]), Number(full[3]));
+    return iso ? { iso, raw: '' } : { iso: '', raw: original };
+  }
+  const loose = core.match(/(?:^|[^\d])(\d{1,2})\s*[月/\-.]\s*(\d{1,2})\s*日?/);
+  if (loose) {
+    const iso = inferYearlessDate(Number(loose[1]), Number(loose[2]), trip, today || taipeiToday());
+    return iso ? { iso, raw: '' } : { iso: '', raw: original };
+  }
+  return { iso: '', raw: original };
+}
+
+function parseLooseTime(value) {
+  const original = clipText(value, 20);
+  if (!original) return { iso: '', raw: '' };
+  const folded = normalizeLooseText(original).replace(/\s+/g, '');
+  if (folded === '中午') return { iso: '12:00', raw: '' };
+  const pm = /下午|晚上|傍晚|pm/i.test(folded);
+  const am = /上午|早上|清晨|am/i.test(folded);
+  const noon = folded.includes('中午');
+  const half = /點半|时半/.test(folded);
+  const body = folded.replace(/上午|早上|清晨|下午|晚上|傍晚|中午|am|pm/ig, '');
+  let hour;
+  let minute;
+  const clock = body.match(/^(\d{1,2}):(\d{2})/);
+  const spoken = body.match(/^(\d{1,2})點(?:(\d{1,2}))?/);
+  const bare = body.match(/^(\d{1,2})$/);
+  if (clock) {
+    hour = Number(clock[1]);
+    minute = Number(clock[2]);
+  } else if (spoken) {
+    hour = Number(spoken[1]);
+    minute = spoken[2] != null ? Number(spoken[2]) : (half ? 30 : 0);
+  } else if (bare) {
+    hour = Number(bare[1]);
+    minute = half ? 30 : 0;
+  } else {
+    return { iso: '', raw: original };
+  }
+  if (half && spoken && spoken[2] == null) minute = 30;
+  if (noon && hour < 12 && !pm && !am) hour = 12;
+  if (pm && hour < 12) hour += 12;
+  if (am && hour === 12) hour = 0;
+  if (hour > 23 || minute > 59) return { iso: '', raw: original };
+  return { iso: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`, raw: '' };
 }
 
 function oneOf(value, list, fallback) {
@@ -512,46 +642,87 @@ function oneOf(value, list, fallback) {
   return list.includes(s) ? s : fallback;
 }
 
-function cleanExtraction(raw) {
+function cleanExtraction(raw, trip) {
   const src = raw && typeof raw === 'object' ? raw : {};
-  const list = (value) => (Array.isArray(value) ? value.slice(0, 80) : []);
-  return {
-    countries: list(src.countries).map((c) => ({
-      name: clipText(c?.name, 40),
-      start: clipDate(c?.start),
-      end: clipDate(c?.end),
-    })).filter((c) => c.name),
-    activities: list(src.activities).map((a) => ({
-      date: clipDate(a?.date),
-      time: clipTime(a?.time),
-      name: clipText(a?.name, 80),
-      location: clipText(a?.location, 200),
-    })).filter((a) => a.name),
-    restaurants: list(src.restaurants).map((r) => ({
-      date: clipDate(r?.date),
-      name: clipText(r?.name, 80),
-      meal: oneOf(r?.meal, MEAL_VALUES, '其他'),
-      time: clipTime(r?.time),
-      place: clipText(r?.place, 200),
-      note: clipText(r?.note, 200),
-    })).filter((r) => r.name),
-    lodgings: list(src.lodgings).map((l) => ({
-      name: clipText(l?.name, 80),
-      checkIn: clipDate(l?.checkIn),
-      checkOut: clipDate(l?.checkOut),
-      address: clipText(l?.address, 200),
-      note: clipText(l?.note, 200),
-    })).filter((l) => l.name),
-    transports: list(src.transports).map((t) => ({
-      date: clipDate(t?.date),
-      type: oneOf(t?.type, RIDE_VALUES, '其他'),
-      from: clipText(t?.from, 80),
-      to: clipText(t?.to, 80),
-      depart: clipTime(t?.depart),
-      arrive: clipTime(t?.arrive),
-      note: clipText(t?.note, 200),
-    })).filter((t) => t.from || t.to),
+  const today = taipeiToday();
+  const flag = { over: false };
+  const list = (value) => {
+    if (!Array.isArray(value)) return [];
+    if (value.length > 80) flag.over = true;
+    return value.slice(0, 80);
   };
+  const dateOf = (value) => parseLooseDate(value, trip, today);
+  const timeOf = (value) => parseLooseTime(value);
+  const extraction = {
+    countries: list(src.countries).map((c) => {
+      const start = dateOf(c?.start);
+      const end = dateOf(c?.end);
+      return {
+        name: clipText(c?.name, 40),
+        start: start.iso,
+        startRaw: start.raw,
+        end: end.iso,
+        endRaw: end.raw,
+      };
+    }).filter((c) => c.name),
+    activities: list(src.activities).map((a) => {
+      const date = dateOf(a?.date);
+      const time = timeOf(a?.time);
+      return {
+        date: date.iso,
+        dateRaw: date.raw,
+        time: time.iso,
+        timeRaw: time.raw,
+        name: clipText(a?.name, 80),
+        location: clipText(a?.location, 200),
+      };
+    }).filter((a) => a.name),
+    restaurants: list(src.restaurants).map((r) => {
+      const date = dateOf(r?.date);
+      const time = timeOf(r?.time);
+      return {
+        date: date.iso,
+        dateRaw: date.raw,
+        name: clipText(r?.name, 80),
+        meal: oneOf(r?.meal, MEAL_VALUES, '其他'),
+        time: time.iso,
+        timeRaw: time.raw,
+        place: clipText(r?.place, 200),
+        note: clipText(r?.note, 200),
+      };
+    }).filter((r) => r.name),
+    lodgings: list(src.lodgings).map((l) => {
+      const checkIn = dateOf(l?.checkIn);
+      const checkOut = dateOf(l?.checkOut);
+      return {
+        name: clipText(l?.name, 80),
+        checkIn: checkIn.iso,
+        checkInRaw: checkIn.raw,
+        checkOut: checkOut.iso,
+        checkOutRaw: checkOut.raw,
+        address: clipText(l?.address, 200),
+        note: clipText(l?.note, 200),
+      };
+    }).filter((l) => l.name),
+    transports: list(src.transports).map((t) => {
+      const date = dateOf(t?.date);
+      const depart = timeOf(t?.depart);
+      const arrive = timeOf(t?.arrive);
+      return {
+        date: date.iso,
+        dateRaw: date.raw,
+        type: oneOf(t?.type, RIDE_VALUES, '其他'),
+        from: clipText(t?.from, 80),
+        to: clipText(t?.to, 80),
+        depart: depart.iso,
+        departRaw: depart.raw,
+        arrive: arrive.iso,
+        arriveRaw: arrive.raw,
+        note: clipText(t?.note, 200),
+      };
+    }).filter((t) => t.from || t.to),
+  };
+  return { extraction, listTruncated: flag.over };
 }
 
 function mockExtraction() {
@@ -561,7 +732,7 @@ function mockExtraction() {
     restaurants: [{ date: '2026-04-01', name: '一蘭拉麵', meal: '午餐', time: '12:30', place: '淺草', note: '範例訂位' }],
     lodgings: [{ name: '淺草飯店', checkIn: '2026-04-01', checkOut: '2026-04-03', address: '東京淺草', note: '範例確認碼' }],
     transports: [{ date: '2026-04-01', type: '火車', from: '東京', to: '京都', depart: '15:00', arrive: '17:20', note: '範例車次' }],
-  });
+  }).extraction;
 }
 
 function guessMime(file) {
@@ -588,12 +759,18 @@ function importContext(trip) {
   const countries = (trip.countries || [])
     .map((c) => `${c.name || ''} ${c.start || '?'}–${c.end || '?'} ${c.tz || ''}`.trim())
     .join('；');
+  const bounds = tripDateBounds(trip);
+  const today = taipeiToday();
   return [
     '你是旅行行程整理助手。請只根據使用者提供的文字、截圖或 PDF 抽出實際出現的行程，不要捏造。',
-    '日期用 YYYY-MM-DD，時間用 24 小時制 HH:MM；不知道就留空字串。',
+    '日期一定要輸出 YYYY-MM-DD，時間一定要輸出 24 小時制 HH:MM。無法判斷的欄位留空字串，不要輸出 11/3、中文日期或上午下午。',
     '餐別只能是 早餐、午餐、晚餐、其他。交通類型只能是 飛機、火車、巴士、租車、其他。',
     '活動的 name 是「做什麼」，location 是「在哪裡」。住宿填入住與退房日期。',
-    '國家名稱請優先用：台灣、日本、韓國、香港、中國、澳洲、紐西蘭、法國、德國、瑞士。',
+    '國家名稱請優先用：台灣、日本、韓國、香港、中國、澳洲、紐西蘭、法國、德國、瑞士、泰國。城市請改寫成所屬國家。',
+    `今天（台北）是 ${today}。`,
+    bounds
+      ? `這趟旅行的日期範圍是 ${bounds.min} 到 ${bounds.max}。沒有寫年份的日期，請用這個範圍判斷年份（跨年也要對到範圍裡）。`
+      : '這趟旅行還沒有日期。沒有寫年份的日期，請用今天以後最近的那一天（含今天；十二月接到隔年一月）。',
     `旅行名稱：${trip.title || ''}`,
     `這趟旅行已有的國家與時區：${countries || '（尚未設定）'}`,
   ].join('\n');
@@ -605,33 +782,73 @@ function isUnknownModel(status, data) {
 }
 
 function friendlyOpenAIError(status, data) {
-  const code = data?.error?.code || '';
-  if (status === 401 || code === 'invalid_api_key') return 'OpenAI 金鑰無效，請確認後再試。';
-  if (status === 429 || code === 'rate_limit_exceeded' || code === 'insufficient_quota') return '匯入太頻繁或額度不足，請稍後再試。';
+  const code = String(data?.error?.code || '').slice(0, 60);
+  const tag = code ? `（${code}）` : '';
+  if (status === 401 || code === 'invalid_api_key') return `OpenAI 金鑰無效${tag}，請確認後再試。`;
+  if (status === 429 || code === 'rate_limit_exceeded' || code === 'insufficient_quota') return `匯入太頻繁或額度不足${tag}，請稍後再試。`;
   if (status === 413) return '檔案太大，請縮小後再試。';
-  return '匯入失敗，請稍後再試。';
+  return `OpenAI 拒絕這次匯入${tag}，請稍後再試。`;
 }
 
-async function callOpenAI({ apiKey, model, messages }) {
+function reasoningRejected(data) {
+  return /reasoning_effort|unknown parameter/i.test(String(data?.error?.message || ''));
+}
+
+function modelText(data) {
+  const content = data?.choices?.[0]?.message?.content;
+  if (Array.isArray(content)) {
+    return content.map((part) => {
+      if (typeof part === 'string') return part;
+      if (part && typeof part.text === 'string') return part.text;
+      return '';
+    }).join('');
+  }
+  return typeof content === 'string' ? content : '';
+}
+
+function parseModelJson(text) {
+  const src = String(text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+  return JSON.parse(src);
+}
+
+async function callOpenAI({ apiKey, model, messages, maxTokens, reasoning }) {
+  const body = {
+    model,
+    messages,
+    response_format: {
+      type: 'json_schema',
+      json_schema: { name: 'itinerary_import', strict: true, schema: IMPORT_SCHEMA },
+    },
+    max_completion_tokens: maxTokens,
+  };
+  if (reasoning) body.reasoning_effort = 'low';
   const res = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      model,
-      messages,
-      response_format: {
-        type: 'json_schema',
-        json_schema: { name: 'itinerary_import', strict: true, schema: IMPORT_SCHEMA },
-      },
-      max_completion_tokens: 4096,
-    }),
+    body: JSON.stringify(body),
     signal: AbortSignal.timeout(90000),
   });
   const data = await res.json().catch(() => ({}));
   return { ok: res.ok, status: res.status, data };
+}
+
+function readModelResult(result) {
+  const finish = result.data?.choices?.[0]?.finish_reason || '';
+  const text = modelText(result.data).trim();
+  let parsed = null;
+  let parseError = false;
+  if (text) {
+    try {
+      parsed = parseModelJson(text);
+    } catch {
+      parseError = true;
+    }
+  }
+  const cut = !text || finish === 'length';
+  return { finish, text, parsed, parseError, cut };
 }
 
 app.get('/api/import/status', (_req, res) => {
@@ -651,7 +868,10 @@ app.post('/api/trips/:tripId/import', async (req, res) => {
     return res.json({ extraction: mockExtraction(), mock: true });
   }
 
-  const text = String(body.text || '').trim().slice(0, IMPORT_MAX_TEXT);
+  const rawText = String(body.text || '').trim();
+  const text = rawText.slice(0, IMPORT_MAX_TEXT);
+  const notices = [];
+  if (rawText.length > IMPORT_MAX_TEXT) notices.push('貼上的文字超過 5 萬字，後面的內容已截斷。請分段再匯入一次。');
   const files = Array.isArray(body.files) ? body.files : [];
   if (!text && !files.length) return res.status(400).json({ error: '請貼上文字或上傳檔案。' });
   if (files.length > IMPORT_MAX_FILES) return res.status(400).json({ error: `一次最多 ${IMPORT_MAX_FILES} 個檔案。` });
@@ -696,12 +916,19 @@ app.post('/api/trips/:tripId/import', async (req, res) => {
     { role: 'user', content: parts },
   ];
   let model = openAIModel();
+  let reasoning = /gpt-5/i.test(model);
+  const run = (maxTokens) => callOpenAI({ apiKey, model, messages, maxTokens, reasoning });
   let result;
   try {
-    result = await callOpenAI({ apiKey, model, messages });
+    result = await run(16000);
+    if (!result.ok && reasoning && reasoningRejected(result.data)) {
+      reasoning = false;
+      result = await run(16000);
+    }
     if (!result.ok && isUnknownModel(result.status, result.data) && model !== FALLBACK_OPENAI_MODEL) {
       model = FALLBACK_OPENAI_MODEL;
-      result = await callOpenAI({ apiKey, model, messages });
+      reasoning = false;
+      result = await run(16000);
     }
   } catch (err) {
     console.error('openai import failed', err?.name || 'error');
@@ -712,15 +939,33 @@ app.post('/api/trips/:tripId/import', async (req, res) => {
     const status = result.status === 429 ? 429 : result.status === 401 ? 401 : 502;
     return res.status(status).json({ error: friendlyOpenAIError(result.status, result.data) });
   }
-  const content = result.data?.choices?.[0]?.message?.content;
-  if (!content) return res.status(502).json({ error: '沒有辨識出行程，請換一張較清楚的截圖或改貼文字。' });
-  let parsed;
-  try {
-    parsed = JSON.parse(content);
-  } catch {
+  let reading = readModelResult(result);
+  if (reading.cut || reading.parseError || !reading.parsed) {
+    try {
+      const second = await run(32000);
+      if (second.ok) {
+        const next = readModelResult(second);
+        const secondBetter = next.parsed && !next.cut && !next.parseError;
+        const firstUnusable = !reading.parsed;
+        if (secondBetter || (firstUnusable && next.parsed)) {
+          result = second;
+          reading = next;
+        }
+      }
+    } catch (err) {
+      console.error('openai import retry failed', err?.name || 'error');
+    }
+  }
+  if (!reading.parsed) {
+    if (reading.cut) {
+      console.error('openai import truncated', reading.finish || 'empty');
+      return res.status(502).json({ error: '辨識結果被截斷，請把行程分成幾段再貼上。' });
+    }
     return res.status(502).json({ error: '辨識結果無法讀取，請再試一次。' });
   }
-  res.json({ extraction: cleanExtraction(parsed), mock: false, model });
+  const cleaned = cleanExtraction(reading.parsed, trip);
+  if (cleaned.listTruncated) notices.push('某一類項目超過 80 筆，多出的已略過。請分段再匯入一次。');
+  res.json({ extraction: cleaned.extraction, mock: false, model, notices });
 });
 
 const PLACES_CACHE_MS = 7 * 24 * 60 * 60 * 1000;

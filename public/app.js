@@ -10,6 +10,7 @@ const COUNTRY_PRESETS = [
   { name: '法國', code: 'FR', tz: 'Europe/Paris', currency: 'EUR' },
   { name: '德國', code: 'DE', tz: 'Europe/Berlin', currency: 'EUR' },
   { name: '瑞士', code: 'CH', tz: 'Europe/Zurich', currency: 'CHF' },
+  { name: '泰國', code: 'TH', tz: 'Asia/Bangkok', currency: 'THB' },
 ];
 const MEALS = ['早餐', '午餐', '晚餐', '其他'];
 const RIDE_TYPES = ['飛機', '火車', '巴士', '租車', '其他'];
@@ -61,12 +62,12 @@ const state = {
 const $ = (sel, el = document) => el.querySelector(sel);
 const $$ = (sel, el = document) => [...el.querySelectorAll(sel)];
 
-function toast(msg) {
+function toast(msg, ms = 2200) {
   const t = document.createElement('div');
   t.className = 'toast';
   t.textContent = msg;
   document.body.appendChild(t);
-  setTimeout(() => t.remove(), 2200);
+  setTimeout(() => t.remove(), ms);
 }
 
 function uid() {
@@ -800,6 +801,13 @@ function buildTimelineDays() {
   for (const lodging of trip.lodgings || []) {
     for (const day of eachDate(calendarDate(lodging.checkIn), calendarDate(lodging.checkOut))) ensure(day);
   }
+  for (const [day, list] of Object.entries(trip.days || {})) {
+    if (Array.isArray(list) && list.length) ensure(day);
+  }
+  for (const restaurant of trip.restaurants || []) ensure(restaurant.date);
+  for (const ride of trip.transports || []) ensure(ride.date);
+  ensure(trip.flights?.outbound?.date);
+  ensure(trip.flights?.inbound?.date);
   return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]));
 }
 
@@ -2661,41 +2669,67 @@ function maybeWelcomeTheme() {
 
 const COUNTRY_ALIASES = {
   '台灣': 'TW', '臺灣': 'TW', taiwan: 'TW', tw: 'TW',
+  '台北': 'TW', '臺北': 'TW', '高雄': 'TW', '台中': 'TW', '臺中': 'TW', '台南': 'TW', '臺南': 'TW', '花蓮': 'TW',
+  taipei: 'TW', kaohsiung: 'TW',
   '日本': 'JP', japan: 'JP', jp: 'JP',
+  '東京': 'JP', '大阪': 'JP', '京都': 'JP', '札幌': 'JP', '福岡': 'JP', '沖繩': 'JP', '名古屋': 'JP', '橫濱': 'JP', '神戶': 'JP', '奈良': 'JP', '廣島': 'JP', '北海道': 'JP',
+  tokyo: 'JP', osaka: 'JP', kyoto: 'JP', sapporo: 'JP', fukuoka: 'JP', okinawa: 'JP',
   '韓國': 'KR', '南韓': 'KR', korea: 'KR', 'south korea': 'KR', kr: 'KR',
-  '香港': 'HK', 'hong kong': 'HK', hk: 'HK',
+  '首爾': 'KR', '釜山': 'KR', '濟州': 'KR', '濟州島': 'KR', '仁川': 'KR',
+  seoul: 'KR', busan: 'KR', jeju: 'KR', incheon: 'KR',
+  '香港': 'HK', 'hong kong': 'HK', hk: 'HK', '九龍': 'HK', kowloon: 'HK',
   '中國': 'CN', '中国': 'CN', china: 'CN', cn: 'CN',
+  '北京': 'CN', '上海': 'CN', '廣州': 'CN', '深圳': 'CN', '成都': 'CN', '杭州': 'CN', '重慶': 'CN', '西安': 'CN',
+  beijing: 'CN', shanghai: 'CN', guangzhou: 'CN', shenzhen: 'CN',
   '澳洲': 'AU', '澳大利亞': 'AU', australia: 'AU', au: 'AU',
+  '雪梨': 'AU', '悉尼': 'AU', '墨爾本': 'AU', '布里斯本': 'AU',
+  sydney: 'AU', melbourne: 'AU',
   '紐西蘭': 'NZ', '新西蘭': 'NZ', 'new zealand': 'NZ', nz: 'NZ',
+  '奧克蘭': 'NZ', '皇后鎮': 'NZ', '基督城': 'NZ',
+  auckland: 'NZ', queenstown: 'NZ',
   '法國': 'FR', france: 'FR', fr: 'FR',
+  '巴黎': 'FR', '尼斯': 'FR', '里昂': 'FR', paris: 'FR',
   '德國': 'DE', germany: 'DE', de: 'DE',
+  '柏林': 'DE', '慕尼黑': 'DE', '法蘭克福': 'DE', berlin: 'DE', munich: 'DE',
   '瑞士': 'CH', switzerland: 'CH', ch: 'CH',
+  '蘇黎世': 'CH', '日內瓦': 'CH', '伯恩': 'CH', zurich: 'CH', geneva: 'CH',
+  '泰國': 'TH', thailand: 'TH', '曼谷': 'TH', '清邁': 'TH', bangkok: 'TH', 'chiang mai': 'TH', chiangmai: 'TH',
 };
 
 function matchPreset(name) {
-  const key = String(name || '').trim().toLowerCase();
-  const code = COUNTRY_ALIASES[key] || COUNTRY_ALIASES[String(name || '').trim()];
-  if (code) return COUNTRY_PRESETS.find((c) => c.code === code);
-  return COUNTRY_PRESETS.find((c) => c.name === String(name || '').trim());
+  const raw = String(name || '').trim();
+  const key = raw.toLowerCase();
+  const direct = COUNTRY_ALIASES[key] || COUNTRY_ALIASES[raw];
+  if (direct) return COUNTRY_PRESETS.find((c) => c.code === direct) || null;
+  const named = COUNTRY_PRESETS.find((c) => c.name === raw);
+  if (named) return named;
+  const keys = Object.keys(COUNTRY_ALIASES).filter((alias) => {
+    if (alias.length < 2) return false;
+    if (/^[\u0000-\u007f]+$/.test(alias) && alias.length < 4) return false;
+    return true;
+  }).sort((a, b) => b.length - a.length);
+  const hit = keys.find((alias) => key.includes(alias.toLowerCase()));
+  return hit ? (COUNTRY_PRESETS.find((c) => c.code === COUNTRY_ALIASES[hit]) || null) : null;
 }
 
 function importDraftFrom(extraction) {
   const src = extraction || {};
   const items = [];
+  const raw = (value) => value || '';
   for (const c of src.countries || []) {
-    items.push({ include: true, kind: 'country', name: c.name || '', start: c.start || '', end: c.end || '' });
+    items.push({ include: true, kind: 'country', name: c.name || '', start: c.start || '', startRaw: raw(c.startRaw), end: c.end || '', endRaw: raw(c.endRaw) });
   }
   for (const a of src.activities || []) {
-    items.push({ include: true, kind: 'activity', date: a.date || '', time: a.time || '', name: a.name || '', location: a.location || '' });
+    items.push({ include: true, kind: 'activity', date: a.date || '', dateRaw: raw(a.dateRaw), time: a.time || '', timeRaw: raw(a.timeRaw), name: a.name || '', location: a.location || '' });
   }
   for (const r of src.restaurants || []) {
-    items.push({ include: true, kind: 'restaurant', date: r.date || '', time: r.time || '', name: r.name || '', meal: r.meal || '其他', place: r.place || '', note: r.note || '' });
+    items.push({ include: true, kind: 'restaurant', date: r.date || '', dateRaw: raw(r.dateRaw), time: r.time || '', timeRaw: raw(r.timeRaw), name: r.name || '', meal: r.meal || '其他', place: r.place || '', note: r.note || '' });
   }
   for (const l of src.lodgings || []) {
-    items.push({ include: true, kind: 'lodging', name: l.name || '', checkIn: l.checkIn || '', checkOut: l.checkOut || '', address: l.address || '', note: l.note || '' });
+    items.push({ include: true, kind: 'lodging', name: l.name || '', checkIn: l.checkIn || '', checkInRaw: raw(l.checkInRaw), checkOut: l.checkOut || '', checkOutRaw: raw(l.checkOutRaw), address: l.address || '', note: l.note || '' });
   }
   for (const t of src.transports || []) {
-    items.push({ include: true, kind: 'transport', date: t.date || '', type: t.type || '其他', from: t.from || '', to: t.to || '', depart: t.depart || '', arrive: t.arrive || '', note: t.note || '' });
+    items.push({ include: true, kind: 'transport', date: t.date || '', dateRaw: raw(t.dateRaw), type: t.type || '其他', from: t.from || '', to: t.to || '', depart: t.depart || '', departRaw: raw(t.departRaw), arrive: t.arrive || '', arriveRaw: raw(t.arriveRaw), note: t.note || '' });
   }
   return items;
 }
@@ -2704,8 +2738,13 @@ function importKindLabel(kind) {
   return { activity: '活動', restaurant: '餐廳', lodging: '住宿', transport: '交通', country: '國家' }[kind] || kind;
 }
 
-function importField(idx, field, label, value, type = 'text') {
-  return `<label>${label}</label><input data-idx="${idx}" data-field="${field}" type="${type}" value="${escapeHtml(value || '')}" />`;
+function importRawHint(raw, current) {
+  if (!raw || current) return '';
+  return `<div class="muted import-raw">無法辨識，原文：${escapeHtml(raw)}</div>`;
+}
+
+function importField(idx, field, label, value, type = 'text', raw = '') {
+  return `<label>${label}</label><input data-idx="${idx}" data-field="${field}" type="${type}" value="${escapeHtml(value || '')}" />${importRawHint(raw, value)}`;
 }
 
 function importSelect(idx, field, label, value, options) {
@@ -2715,15 +2754,15 @@ function importSelect(idx, field, label, value, options) {
 function importItemHtml(item, idx) {
   let fields = '';
   if (item.kind === 'country') {
-    fields = importField(idx, 'name', '國家', item.name) + importField(idx, 'start', '開始', item.start, 'date') + importField(idx, 'end', '結束', item.end, 'date');
+    fields = importField(idx, 'name', '國家', item.name) + importField(idx, 'start', '開始', item.start, 'date', item.startRaw) + importField(idx, 'end', '結束', item.end, 'date', item.endRaw);
   } else if (item.kind === 'activity') {
-    fields = importField(idx, 'name', '做什麼', item.name) + importField(idx, 'time', '時間', item.time, 'time') + importField(idx, 'location', '在哪裡', item.location) + importField(idx, 'date', '日期', item.date, 'date');
+    fields = importField(idx, 'name', '做什麼', item.name) + importField(idx, 'time', '時間', item.time, 'time', item.timeRaw) + importField(idx, 'location', '在哪裡', item.location) + importField(idx, 'date', '日期', item.date, 'date', item.dateRaw);
   } else if (item.kind === 'restaurant') {
-    fields = importField(idx, 'name', '餐廳', item.name) + importSelect(idx, 'meal', '餐別', item.meal, MEALS) + importField(idx, 'time', '時間', item.time, 'time') + importField(idx, 'place', '地址或地圖', item.place) + importField(idx, 'note', '訂位備註', item.note) + importField(idx, 'date', '日期', item.date, 'date');
+    fields = importField(idx, 'name', '餐廳', item.name) + importSelect(idx, 'meal', '餐別', item.meal, MEALS) + importField(idx, 'time', '時間', item.time, 'time', item.timeRaw) + importField(idx, 'place', '地址或地圖', item.place) + importField(idx, 'note', '訂位備註', item.note) + importField(idx, 'date', '日期', item.date, 'date', item.dateRaw);
   } else if (item.kind === 'lodging') {
-    fields = importField(idx, 'name', '住宿', item.name) + importField(idx, 'checkIn', '入住', item.checkIn, 'date') + importField(idx, 'checkOut', '退房', item.checkOut, 'date') + importField(idx, 'address', '地址或地圖', item.address) + importField(idx, 'note', '訂房備註', item.note);
+    fields = importField(idx, 'name', '住宿', item.name) + importField(idx, 'checkIn', '入住', item.checkIn, 'date', item.checkInRaw) + importField(idx, 'checkOut', '退房', item.checkOut, 'date', item.checkOutRaw) + importField(idx, 'address', '地址或地圖', item.address) + importField(idx, 'note', '訂房備註', item.note);
   } else if (item.kind === 'transport') {
-    fields = importSelect(idx, 'type', '類型', item.type, RIDE_TYPES) + importField(idx, 'from', '出發地', item.from) + importField(idx, 'to', '目的地', item.to) + importField(idx, 'depart', '出發', item.depart, 'time') + importField(idx, 'arrive', '抵達', item.arrive, 'time') + importField(idx, 'note', '訂位備註', item.note) + importField(idx, 'date', '日期', item.date, 'date');
+    fields = importSelect(idx, 'type', '類型', item.type, RIDE_TYPES) + importField(idx, 'from', '出發地', item.from) + importField(idx, 'to', '目的地', item.to) + importField(idx, 'depart', '出發', item.depart, 'time', item.departRaw) + importField(idx, 'arrive', '抵達', item.arrive, 'time', item.arriveRaw) + importField(idx, 'note', '訂位備註', item.note) + importField(idx, 'date', '日期', item.date, 'date', item.dateRaw);
   }
   const range = item.kind === 'lodging' && item.checkIn ? `<div class="muted">${escapeHtml(item.checkIn)} → ${escapeHtml(item.checkOut || '?')}，確認後會出現在這段每一天</div>` : '';
   return `
@@ -2776,6 +2815,19 @@ function readImportDraft(root, draft) {
   return items;
 }
 
+function importSkipLabel(item) {
+  return item.name || [item.from, item.to].filter(Boolean).join('→') || importKindLabel(item.kind);
+}
+
+function importResultMessage(added, skipped) {
+  const shown = skipped.slice(0, 8).map((row) => `${row.label}（${row.reason}）`).join('、');
+  const extra = skipped.length > 8 ? `等 ${skipped.length} 項` : '';
+  if (!added) {
+    return skipped.length ? `沒有可匯入的項目。略過：${shown}${extra}` : '沒有可匯入的項目';
+  }
+  return skipped.length ? `已匯入 ${added} 項，略過 ${skipped.length} 項：${shown}${extra}` : `已匯入 ${added} 項`;
+}
+
 async function commitImport(draft) {
   const days = { ...(state.trip.days || {}) };
   for (const key of Object.keys(days)) days[key] = (days[key] || []).slice();
@@ -2783,27 +2835,36 @@ async function commitImport(draft) {
   const lodgings = (state.trip.lodgings || []).slice();
   const transports = (state.trip.transports || []).slice();
   const countries = (state.trip.countries || []).slice();
+  const skipped = [];
   let added = 0;
+  const skip = (item, reason) => skipped.push({ label: importSkipLabel(item), reason });
   for (const item of draft) {
     if (!item.include) continue;
     if (item.kind === 'activity') {
-      if (!item.date || !item.name) continue;
+      if (!item.name) { skip(item, '缺名稱'); continue; }
+      if (!item.date) { skip(item, '缺日期'); continue; }
       days[item.date] = (days[item.date] || []).concat([{ id: uid(), text: item.name.slice(0, 80), time: item.time || '', place: (item.location || '').slice(0, 200) }]);
       added += 1;
     } else if (item.kind === 'restaurant') {
-      if (!item.name) continue;
+      if (!item.name) { skip(item, '缺名稱'); continue; }
+      if (!item.date) { skip(item, '缺日期'); continue; }
       restaurants.push({ id: uid(), date: item.date, name: item.name.slice(0, 80), meal: MEALS.includes(item.meal) ? item.meal : '其他', time: item.time || '', place: (item.place || '').slice(0, 200), note: (item.note || '').slice(0, 200) });
       added += 1;
     } else if (item.kind === 'lodging') {
-      if (!item.name || !item.checkIn || !item.checkOut || item.checkOut < item.checkIn) continue;
+      if (!item.name) { skip(item, '缺名稱'); continue; }
+      if (!item.checkIn || !item.checkOut) { skip(item, '缺日期'); continue; }
+      if (item.checkOut < item.checkIn) { skip(item, '退房早於入住'); continue; }
       lodgings.push({ id: uid(), name: item.name.slice(0, 80), checkIn: item.checkIn, checkOut: item.checkOut, place: (item.address || '').slice(0, 200), note: (item.note || '').slice(0, 200) });
       added += 1;
     } else if (item.kind === 'transport') {
-      if (!item.from && !item.to) continue;
+      if (!item.from && !item.to) { skip(item, '缺起訖'); continue; }
+      if (!item.date) { skip(item, '缺日期'); continue; }
       transports.push({ id: uid(), date: item.date, type: RIDE_TYPES.includes(item.type) ? item.type : '其他', from: (item.from || '').slice(0, 80), to: (item.to || '').slice(0, 80), depart: item.depart || '', arrive: item.arrive || '', note: (item.note || '').slice(0, 200) });
       added += 1;
     } else if (item.kind === 'country') {
-      if (!item.name || !item.start || !item.end || item.end < item.start) continue;
+      if (!item.name) { skip(item, '缺名稱'); continue; }
+      if (!item.start || !item.end) { skip(item, '缺日期'); continue; }
+      if (item.end < item.start) { skip(item, '結束早於開始'); continue; }
       const preset = matchPreset(item.name);
       const country = {
         id: uid(),
@@ -2815,14 +2876,15 @@ async function commitImport(draft) {
         end: item.end,
       };
       const dup = countries.some((c) => c.name === country.name && c.start === country.start && c.end === country.end);
-      if (dup) continue;
+      if (dup) { skip(item, '與現有區間重複'); continue; }
       countries.push(country);
       added += 1;
     }
   }
-  if (!added) throw new Error('沒有可匯入的項目');
+  const message = importResultMessage(added, skipped);
+  if (!added) throw new Error(message);
   await saveTrip({ days, restaurants, lodgings, transports, countries });
-  return added;
+  return { added, skipped, message };
 }
 
 function fileMime(file) {
@@ -3033,10 +3095,11 @@ function openImportSheet() {
     return remember ? savedKey() : '';
   }
 
-  function showReview(extraction, mock) {
+  function showReview(extraction, mock, notices) {
     draft = importDraftFrom(extraction);
     $('#import-body', wrap).innerHTML = `
       ${mock ? '<div class="muted">這是範例資料，沒有呼叫 OpenAI。</div>' : ''}
+      ${(notices || []).map((note) => `<div class="muted">${escapeHtml(note)}</div>`).join('')}
       ${importReviewHtml(draft)}
       <div class="actions">
         <button class="secondary" type="button" id="import-back">返回</button>
@@ -3049,13 +3112,13 @@ function openImportSheet() {
       btn.disabled = true;
       try {
         const items = readImportDraft($('#import-body', wrap), draft);
-        const added = await commitImport(items);
+        const result = await commitImport(items);
         if (closed) return;
         close();
-        toast(`已匯入 ${added} 項`);
+        toast(result.message, result.skipped.length ? 7000 : 2800);
       } catch (err) {
         btn.disabled = false;
-        toast(err.message || '匯入失敗');
+        toast(err.message || '匯入失敗', String(err.message || '').includes('略過') ? 7000 : 2200);
       }
     });
   }
@@ -3078,7 +3141,7 @@ function openImportSheet() {
       const data = await api(`/api/trips/${state.trip.id}/import`, { method: 'POST', body: JSON.stringify(payload) });
       if (closed) return;
       clearDraft({ type: 'import', id: 'text', day: '' });
-      showReview(data.extraction, data.mock);
+      showReview(data.extraction, data.mock, data.notices);
     } catch (err) {
       if (go) go.disabled = false;
       if (sample) sample.disabled = false;
