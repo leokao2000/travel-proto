@@ -805,7 +805,13 @@ function buildTimelineDays() {
     if (Array.isArray(list) && list.length) ensure(day);
   }
   for (const restaurant of trip.restaurants || []) ensure(restaurant.date);
-  for (const ride of trip.transports || []) ensure(ride.date);
+  for (const ride of trip.transports || []) {
+    ensure(ride.date);
+    ensure(settleOvernightDate(ride.date, ride.depart, ride.arrive, ride.arriveDate));
+  }
+  for (const [day, list] of Object.entries(trip.days || {})) {
+    for (const activity of list || []) ensure(settleOvernightDate(day, activity?.time, activity?.endTime, activity?.endDate));
+  }
   ensure(trip.flights?.outbound?.date);
   ensure(trip.flights?.inbound?.date);
   return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]));
@@ -824,6 +830,79 @@ function sortedByTime(list, field) {
 
 function activityName(a) {
   return String(a?.text || a?.name || '').trim();
+}
+
+function effectiveArriveDate(ride) {
+  return settleOvernightDate(ride?.date, ride?.depart, ride?.arrive, ride?.arriveDate);
+}
+
+function effectiveActivityEnd(activity, startDate) {
+  return settleOvernightDate(startDate, activity?.time, activity?.endTime, activity?.endDate);
+}
+
+function rideIsOvernight(ride) {
+  const start = calendarDate(ride?.date);
+  const end = effectiveArriveDate(ride);
+  return !!(start && end && end > start);
+}
+
+function activityIsOvernight(activity, startDate) {
+  const start = calendarDate(startDate);
+  const end = effectiveActivityEnd(activity, startDate);
+  return !!(start && end && end > start);
+}
+
+function settleOvernightDate(startDate, startTime, endTime, explicitEnd) {
+  const start = calendarDate(startDate);
+  const chosen = calendarDate(explicitEnd);
+  if (chosen && start && chosen < start) return '';
+  if (chosen && start && chosen > start) return chosen;
+  if (start && startTime && endTime && endTime < startTime) return shiftDate(start, 1);
+  return '';
+}
+
+function overnightStayTitle(ride) {
+  return ride?.type === '飛機' ? '紅眼航班' : '夜車';
+}
+
+function rideScheduleText(ride, continuation) {
+  const start = calendarDate(ride?.date);
+  const end = effectiveArriveDate(ride);
+  if (continuation) return ride?.arrive ? `${ride.arrive} 抵達` : '隔天續';
+  if (rideIsOvernight(ride)) {
+    const when = end === shiftDate(start, 1) ? '隔天' : end;
+    const tail = ride.arrive ? `${when} ${ride.arrive} 抵達` : `${when}抵達`;
+    return `${ride.depart ? `${ride.depart} 出發 ` : ''}→ ${tail}`;
+  }
+  const parts = [];
+  if (ride?.depart) parts.push(`${ride.depart} 出發`);
+  if (ride?.arrive) parts.push(`${ride.arrive} 抵達`);
+  return parts.join(' · ');
+}
+
+function activityScheduleText(activity, startDate, continuation) {
+  if (continuation) return activity?.endTime ? `${activity.endTime} 結束` : '隔天續';
+  const end = effectiveActivityEnd(activity, startDate);
+  if (activityIsOvernight(activity, startDate) && activity?.endTime) {
+    const when = end === shiftDate(startDate, 1) ? '隔天' : end;
+    return `${activity.time || ''}–${when} ${activity.endTime}`.replace(/^–/, '');
+  }
+  if (activity?.endTime) return `${activity.time ? `${activity.time}–` : ''}${activity.endTime}`;
+  return activity?.time || '';
+}
+
+function ridesContinuing(date) {
+  return (state.trip?.transports || []).filter((ride) => effectiveArriveDate(ride) === date && calendarDate(ride.date) !== date);
+}
+
+function activitiesContinuing(date) {
+  const out = [];
+  for (const [day, list] of Object.entries(state.trip?.days || {})) {
+    for (const activity of list || []) {
+      if (effectiveActivityEnd(activity, day) === date && day !== date) out.push({ ...activity, startDate: day });
+    }
+  }
+  return out;
 }
 
 function stayStatus(lodging, date) {
@@ -952,9 +1031,14 @@ function renderTimeline() {
       </div>
       ${days.length ? days.map(([date, countries]) => {
         const acts = sortedByTime(trip.days?.[date] || [], 'time');
+        const actNext = activitiesContinuing(date);
         const foods = sortedByTime((trip.restaurants || []).filter((r) => r.date === date), 'time');
         const stays = lodgingOn(date);
         const rides = sortedByTime((trip.transports || []).filter((r) => r.date === date), 'depart');
+        const rideNext = ridesContinuing(date).filter((r) => calendarDate(r.date) !== date);
+        const nightRide = (trip.transports || []).find((r) => calendarDate(r.date) === date && rideIsOvernight(r));
+        const morningRide = rideNext[0];
+        const hasNightBed = !!nightLodging(date);
         return `
           <div class="day">
             ${countries[0] ? `<div class="day-mark">${renderPattern(countries[0], 2, 'bg')}</div>` : ''}
@@ -966,18 +1050,32 @@ function renderTimeline() {
               <button class="ghost ${prefs.activity ? '' : 'hidden'}" data-add-act="${date}" type="button">+ 活動</button>
             </div>
             <div class="timeline ${prefs.activity ? '' : 'hidden'}">
-              ${acts.map((a) => `
+              ${acts.map((a) => {
+                const clock = activityScheduleText(a, date, false);
+                return `
                 <div class="activity">
                   <div class="activity-main">
-                    <div>${a.time ? `<span class="act-time">${escapeHtml(a.time)}</span>` : ''}${escapeHtml(activityName(a) || '（未命名）')}</div>
+                    <div>${clock ? `<span class="act-time">${escapeHtml(clock)}</span>` : ''}${escapeHtml(activityName(a) || '（未命名）')}</div>
                     ${placeHtml(a.place)}
                   </div>
                   <div class="item-actions">
                     <button class="ghost" data-edit-act="${a.id}" data-act-date="${date}" type="button">改</button>
                     <button class="ghost" data-del-act="${a.id}" data-act-date="${date}" type="button">刪</button>
                   </div>
+                </div>`;
+              }).join('')}
+              ${actNext.map((a) => `
+                <div class="activity continuation">
+                  <div class="activity-main">
+                    <div><span class="act-time">續</span>${escapeHtml(activityName(a) || '（未命名）')} <span class="muted">${escapeHtml(activityScheduleText(a, a.startDate, true))}</span></div>
+                    ${placeHtml(a.place)}
+                  </div>
+                  <div class="item-actions">
+                    <button class="ghost" data-edit-act="${a.id}" data-act-date="${a.startDate}" type="button">改</button>
+                    <button class="ghost" data-del-act="${a.id}" data-act-date="${a.startDate}" type="button">刪</button>
+                  </div>
                 </div>
-              `).join('') || '<div class="muted" style="padding-top:0.4rem">尚無活動</div>'}
+              `).join('') || (acts.length ? '' : '<div class="muted" style="padding-top:0.4rem">尚無活動</div>')}
             </div>
             <div class="day-blocks ${prefs.food || prefs.stay || prefs.ride ? '' : 'hidden'}">
               <section class="block block-food ${prefs.food ? '' : 'hidden'}">
@@ -1005,6 +1103,26 @@ function renderTimeline() {
               </section>
               <section class="block block-stay ${prefs.stay ? '' : 'hidden'}">
                 <div class="block-head">${ICON_STAY}<h3 class="block-title">住宿</h3><button class="secondary slim" type="button" data-add-stay="${date}">新增</button></div>
+                ${(() => {
+                  if (hasNightBed) return '';
+                  const ride = nightRide || (!stays.length ? morningRide : null);
+                  if (!ride) return '';
+                  const arriving = !nightRide;
+                  const title = overnightStayTitle(ride);
+                  return `
+                    <div class="block-card overnight-stay">
+                      <div class="block-card-top">
+                        <div>
+                          <strong>${title}</strong><span class="pill">${arriving ? '抵達' : '過夜'}</span>
+                          <div class="muted">${escapeHtml(ride.from || '—')} → ${escapeHtml(ride.to || '—')}</div>
+                          <div class="muted">${escapeHtml(rideScheduleText(ride, arriving))}</div>
+                        </div>
+                        <div class="item-actions">
+                          <button class="ghost" type="button" data-edit-ride="${ride.id}">改</button>
+                        </div>
+                      </div>
+                    </div>`;
+                })()}
                 ${stays.map((l) => {
                   const query = placeSearchQuery(l, trip, l.checkIn);
                   if (query) reviewQueries.push(query);
@@ -1027,7 +1145,7 @@ function renderTimeline() {
                     ${placesCardHtml(l, query, 'stay')}
                   </div>
                 `;
-                }).join('') || '<div class="empty-line">尚無住宿</div>'}
+                }).join('') || ((hasNightBed || nightRide || (!stays.length && morningRide)) ? '' : '<div class="empty-line">尚無住宿</div>')}
               </section>
               <section class="block block-ride ${prefs.ride ? '' : 'hidden'}">
                 <div class="block-head">${ICON_RIDE}<h3 class="block-title">交通</h3><button class="secondary slim" type="button" data-add-ride="${date}">新增</button></div>
@@ -1036,7 +1154,7 @@ function renderTimeline() {
                     <div class="block-card-top">
                       <div>
                         <strong>${escapeHtml(r.from || '—')} → ${escapeHtml(r.to || '—')}</strong><span class="pill">${escapeHtml(r.type || '其他')}</span>
-                        <div class="muted">${r.depart ? `${escapeHtml(r.depart)} 出發` : ''}${r.depart && r.arrive ? ' · ' : ''}${r.arrive ? `${escapeHtml(r.arrive)} 抵達` : ''}</div>
+                        <div class="muted">${escapeHtml(rideScheduleText(r, false))}</div>
                       </div>
                       <div class="item-actions">
                         <button class="ghost" type="button" data-edit-ride="${r.id}">改</button>
@@ -1045,7 +1163,21 @@ function renderTimeline() {
                     </div>
                     ${r.note ? `<div class="muted note-line">${escapeHtml(r.note)}</div>` : ''}
                   </div>
-                `).join('') || '<div class="empty-line">尚無交通</div>'}
+                `).join('')}
+                ${rideNext.map((r) => `
+                  <div class="block-card continuation">
+                    <div class="block-card-top">
+                      <div>
+                        <strong>續 · ${escapeHtml(r.from || '—')} → ${escapeHtml(r.to || '—')}</strong><span class="pill">${escapeHtml(r.type || '其他')}</span>
+                        <div class="muted">${escapeHtml(rideScheduleText(r, true))}</div>
+                      </div>
+                      <div class="item-actions">
+                        <button class="ghost" type="button" data-edit-ride="${r.id}">改</button>
+                        <button class="ghost" type="button" data-del-ride="${r.id}">刪</button>
+                      </div>
+                    </div>
+                  </div>
+                `).join('') || (rides.length ? '' : '<div class="empty-line">尚無交通</div>')}
               </section>
             </div>
           </div>
@@ -2419,25 +2551,31 @@ function openActivityModal(date, activity) {
   openModal(activity ? `${date} 編輯活動` : `${date} 新增活動`, `
     <label>做什麼</label>
     <input id="a-text" maxlength="80" placeholder="例如：淺草寺" value="${escapeHtml(activity ? activityName(activity) : '')}" />
-    <label>時間</label>
+    <label>開始時間</label>
     <input id="a-time" type="time" value="${escapeHtml(activity?.time || '')}" />
+    <label>結束時間</label>
+    <input id="a-end" type="time" value="${escapeHtml(activity?.endTime || '')}" />
+    <label>結束日期</label>
+    <input id="a-end-date" type="date" value="${escapeHtml(calendarDate(activity?.endDate) || '')}" />
+    <div class="muted">結束時間比開始早，會把結束日設成第二天。同一天結束可以留空結束日期。</div>
     <label>在哪裡</label>
     <input id="a-place" maxlength="200" placeholder="區域或地址，可留空" value="${escapeHtml(activity?.place || '')}" />
   `, async (wrap) => {
     const text = $('#a-text', wrap).value.trim();
     if (!text) throw new Error('請填做什麼');
     const time = $('#a-time', wrap).value;
+    const endTime = $('#a-end', wrap).value;
     const place = $('#a-place', wrap).value.trim().slice(0, 200);
+    const endDate = settleOvernightDate(date, time, endTime, $('#a-end-date', wrap).value);
+    if ($('#a-end-date', wrap).value && calendarDate($('#a-end-date', wrap).value) < calendarDate(date)) throw new Error('結束日不能早於開始日');
     const days = { ...(state.trip.days || {}) };
     const list = (days[date] || []).slice();
+    const next = { ...(activity || {}), id: activity?.id || uid(), text, time, endTime, endDate, place };
     if (activity) {
       const idx = list.findIndex((a) => a.id === activity.id);
-      const next = { ...activity, id: activity.id, text, time, place };
       if (idx >= 0) list[idx] = next;
       else list.push(next);
-    } else {
-      list.push({ id: uid(), text, time, place });
-    }
+    } else list.push(next);
     days[date] = list;
     await saveTrip({ days });
   }, { draft: { type: 'activity', id: activity?.id || 'new', day: date || '' } });
@@ -2577,23 +2715,35 @@ function openRideModal({ date, item } = {}) {
     <label>目的地</label>
     <input id="ride-to" list="ride-locations" maxlength="80" placeholder="例如：大阪" value="${escapeHtml(value.to || '')}" />
     <datalist id="ride-locations">${locationOptions}</datalist>
+    <label>出發日期</label>
+    <input id="ride-date" type="date" value="${escapeHtml(calendarDate(value.date) || '')}" />
     <label>出發時間</label>
     <input id="ride-depart" type="time" value="${escapeHtml(value.depart || '')}" />
+    <label>抵達日期</label>
+    <input id="ride-arrive-date" type="date" value="${escapeHtml(calendarDate(value.arriveDate) || '')}" />
     <label>抵達時間</label>
     <input id="ride-arrive" type="time" value="${escapeHtml(value.arrive || '')}" />
+    <div class="muted">夜車、臥鋪、紅眼航班：抵達時間比出發早時，抵達日會自動設成第二天。</div>
     <label>訂位備註</label>
     <input id="ride-note" maxlength="200" placeholder="車次、訂位代號…" value="${escapeHtml(value.note || '')}" />
   `, async (wrap) => {
     const from = $('#ride-from', wrap).value.trim().slice(0, 80);
     const to = $('#ride-to', wrap).value.trim().slice(0, 80);
     if (!from && !to) throw new Error('請填出發地或目的地');
+    const rideDate = $('#ride-date', wrap).value || item?.date || date;
+    if (!rideDate) throw new Error('請填出發日期');
+    const depart = $('#ride-depart', wrap).value;
+    const arrive = $('#ride-arrive', wrap).value;
+    const typedEnd = $('#ride-arrive-date', wrap).value;
+    if (typedEnd && calendarDate(typedEnd) < calendarDate(rideDate)) throw new Error('抵達日不能早於出發日');
     const fields = {
-      date: item?.date || date,
+      date: rideDate,
       type: $('#ride-type', wrap).value,
       from,
       to,
-      depart: $('#ride-depart', wrap).value,
-      arrive: $('#ride-arrive', wrap).value,
+      depart,
+      arrive,
+      arriveDate: settleOvernightDate(rideDate, depart, arrive, typedEnd),
       note: $('#ride-note', wrap).value.trim().slice(0, 200),
     };
     let transports;
@@ -2720,7 +2870,7 @@ function importDraftFrom(extraction) {
     items.push({ include: true, kind: 'country', name: c.name || '', start: c.start || '', startRaw: raw(c.startRaw), end: c.end || '', endRaw: raw(c.endRaw) });
   }
   for (const a of src.activities || []) {
-    items.push({ include: true, kind: 'activity', date: a.date || '', dateRaw: raw(a.dateRaw), time: a.time || '', timeRaw: raw(a.timeRaw), name: a.name || '', location: a.location || '' });
+    items.push({ include: true, kind: 'activity', date: a.date || '', dateRaw: raw(a.dateRaw), time: a.time || '', timeRaw: raw(a.timeRaw), endTime: a.endTime || '', endTimeRaw: raw(a.endTimeRaw), endDate: a.endDate || '', endDateRaw: raw(a.endDateRaw), name: a.name || '', location: a.location || '' });
   }
   for (const r of src.restaurants || []) {
     items.push({ include: true, kind: 'restaurant', date: r.date || '', dateRaw: raw(r.dateRaw), time: r.time || '', timeRaw: raw(r.timeRaw), name: r.name || '', meal: r.meal || '其他', place: r.place || '', note: r.note || '' });
@@ -2729,7 +2879,7 @@ function importDraftFrom(extraction) {
     items.push({ include: true, kind: 'lodging', name: l.name || '', checkIn: l.checkIn || '', checkInRaw: raw(l.checkInRaw), checkOut: l.checkOut || '', checkOutRaw: raw(l.checkOutRaw), address: l.address || '', note: l.note || '' });
   }
   for (const t of src.transports || []) {
-    items.push({ include: true, kind: 'transport', date: t.date || '', dateRaw: raw(t.dateRaw), type: t.type || '其他', from: t.from || '', to: t.to || '', depart: t.depart || '', departRaw: raw(t.departRaw), arrive: t.arrive || '', arriveRaw: raw(t.arriveRaw), note: t.note || '' });
+    items.push({ include: true, kind: 'transport', date: t.date || '', dateRaw: raw(t.dateRaw), type: t.type || '其他', from: t.from || '', to: t.to || '', depart: t.depart || '', departRaw: raw(t.departRaw), arrive: t.arrive || '', arriveRaw: raw(t.arriveRaw), arriveDate: t.arriveDate || '', arriveDateRaw: raw(t.arriveDateRaw), note: t.note || '' });
   }
   return items;
 }
@@ -2756,13 +2906,13 @@ function importItemHtml(item, idx) {
   if (item.kind === 'country') {
     fields = importField(idx, 'name', '國家', item.name) + importField(idx, 'start', '開始', item.start, 'date', item.startRaw) + importField(idx, 'end', '結束', item.end, 'date', item.endRaw);
   } else if (item.kind === 'activity') {
-    fields = importField(idx, 'name', '做什麼', item.name) + importField(idx, 'time', '時間', item.time, 'time', item.timeRaw) + importField(idx, 'location', '在哪裡', item.location) + importField(idx, 'date', '日期', item.date, 'date', item.dateRaw);
+    fields = importField(idx, 'name', '做什麼', item.name) + importField(idx, 'time', '開始', item.time, 'time', item.timeRaw) + importField(idx, 'endTime', '結束', item.endTime, 'time', item.endTimeRaw) + importField(idx, 'location', '在哪裡', item.location) + importField(idx, 'date', '日期', item.date, 'date', item.dateRaw) + importField(idx, 'endDate', '結束日期', item.endDate, 'date', item.endDateRaw);
   } else if (item.kind === 'restaurant') {
     fields = importField(idx, 'name', '餐廳', item.name) + importSelect(idx, 'meal', '餐別', item.meal, MEALS) + importField(idx, 'time', '時間', item.time, 'time', item.timeRaw) + importField(idx, 'place', '地址或地圖', item.place) + importField(idx, 'note', '訂位備註', item.note) + importField(idx, 'date', '日期', item.date, 'date', item.dateRaw);
   } else if (item.kind === 'lodging') {
     fields = importField(idx, 'name', '住宿', item.name) + importField(idx, 'checkIn', '入住', item.checkIn, 'date', item.checkInRaw) + importField(idx, 'checkOut', '退房', item.checkOut, 'date', item.checkOutRaw) + importField(idx, 'address', '地址或地圖', item.address) + importField(idx, 'note', '訂房備註', item.note);
   } else if (item.kind === 'transport') {
-    fields = importSelect(idx, 'type', '類型', item.type, RIDE_TYPES) + importField(idx, 'from', '出發地', item.from) + importField(idx, 'to', '目的地', item.to) + importField(idx, 'depart', '出發', item.depart, 'time', item.departRaw) + importField(idx, 'arrive', '抵達', item.arrive, 'time', item.arriveRaw) + importField(idx, 'note', '訂位備註', item.note) + importField(idx, 'date', '日期', item.date, 'date', item.dateRaw);
+    fields = importSelect(idx, 'type', '類型', item.type, RIDE_TYPES) + importField(idx, 'from', '出發地', item.from) + importField(idx, 'to', '目的地', item.to) + importField(idx, 'depart', '出發', item.depart, 'time', item.departRaw) + importField(idx, 'arrive', '抵達', item.arrive, 'time', item.arriveRaw) + importField(idx, 'note', '訂位備註', item.note) + importField(idx, 'date', '出發日期', item.date, 'date', item.dateRaw) + importField(idx, 'arriveDate', '抵達日期', item.arriveDate, 'date', item.arriveDateRaw);
   }
   const range = item.kind === 'lodging' && item.checkIn ? `<div class="muted">${escapeHtml(item.checkIn)} → ${escapeHtml(item.checkOut || '?')}，確認後會出現在這段每一天</div>` : '';
   return `
@@ -2843,7 +2993,9 @@ async function commitImport(draft) {
     if (item.kind === 'activity') {
       if (!item.name) { skip(item, '缺名稱'); continue; }
       if (!item.date) { skip(item, '缺日期'); continue; }
-      days[item.date] = (days[item.date] || []).concat([{ id: uid(), text: item.name.slice(0, 80), time: item.time || '', place: (item.location || '').slice(0, 200) }]);
+      const endDate = settleOvernightDate(item.date, item.time, item.endTime, item.endDate);
+      if (item.endDate && calendarDate(item.endDate) < calendarDate(item.date)) { skip(item, '結束早於開始'); continue; }
+      days[item.date] = (days[item.date] || []).concat([{ id: uid(), text: item.name.slice(0, 80), time: item.time || '', endTime: item.endTime || '', endDate, place: (item.location || '').slice(0, 200) }]);
       added += 1;
     } else if (item.kind === 'restaurant') {
       if (!item.name) { skip(item, '缺名稱'); continue; }
@@ -2859,7 +3011,9 @@ async function commitImport(draft) {
     } else if (item.kind === 'transport') {
       if (!item.from && !item.to) { skip(item, '缺起訖'); continue; }
       if (!item.date) { skip(item, '缺日期'); continue; }
-      transports.push({ id: uid(), date: item.date, type: RIDE_TYPES.includes(item.type) ? item.type : '其他', from: (item.from || '').slice(0, 80), to: (item.to || '').slice(0, 80), depart: item.depart || '', arrive: item.arrive || '', note: (item.note || '').slice(0, 200) });
+      if (item.arriveDate && calendarDate(item.arriveDate) < calendarDate(item.date)) { skip(item, '抵達早於出發'); continue; }
+      const arriveDate = settleOvernightDate(item.date, item.depart, item.arrive, item.arriveDate);
+      transports.push({ id: uid(), date: item.date, type: RIDE_TYPES.includes(item.type) ? item.type : '其他', from: (item.from || '').slice(0, 80), to: (item.to || '').slice(0, 80), depart: item.depart || '', arrive: item.arrive || '', arriveDate, note: (item.note || '').slice(0, 200) });
       added += 1;
     } else if (item.kind === 'country') {
       if (!item.name) { skip(item, '缺名稱'); continue; }

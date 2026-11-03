@@ -426,10 +426,12 @@ const IMPORT_SCHEMA = {
         properties: {
           date: { type: 'string' },
           time: { type: 'string' },
+          endTime: { type: 'string' },
+          endDate: { type: 'string' },
           name: { type: 'string' },
           location: { type: 'string' },
         },
-        required: ['date', 'time', 'name', 'location'],
+        required: ['date', 'time', 'endTime', 'endDate', 'name', 'location'],
       },
     },
     restaurants: {
@@ -475,9 +477,10 @@ const IMPORT_SCHEMA = {
           to: { type: 'string' },
           depart: { type: 'string' },
           arrive: { type: 'string' },
+          arriveDate: { type: 'string' },
           note: { type: 'string' },
         },
-        required: ['date', 'type', 'from', 'to', 'depart', 'arrive', 'note'],
+        required: ['date', 'type', 'from', 'to', 'depart', 'arrive', 'arriveDate', 'note'],
       },
     },
   },
@@ -602,16 +605,37 @@ function parseLooseDate(value, trip, today) {
   return { iso: '', raw: original };
 }
 
+function addDays(dateStr, days) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return '';
+  const [year, month, day] = dateStr.split('-').map(Number);
+  const dt = new Date(Date.UTC(year, month - 1, day));
+  dt.setUTCDate(dt.getUTCDate() + days);
+  return dt.toISOString().slice(0, 10);
+}
+
+function mentionsNextDay(value) {
+  return /隔天|翌日|次日|第二天|\+1|＋1/.test(normalizeLooseText(value));
+}
+
+function splitTimeSpan(value) {
+  const text = String(value || '').trim();
+  if (!text) return null;
+  const match = text.match(/^(.+?\d(?::\d{2})?(?:點(?:半|\d{1,2})?)?)\s*(?:–|—|~|～|至|到|-)\s*(.+)$/);
+  if (!match) return null;
+  return [match[1], match[2]];
+}
+
 function parseLooseTime(value) {
-  const original = clipText(value, 20);
-  if (!original) return { iso: '', raw: '' };
+  const original = clipText(value, 40);
+  if (!original) return { iso: '', raw: '', nextDay: false };
   const folded = normalizeLooseText(original).replace(/\s+/g, '');
-  if (folded === '中午') return { iso: '12:00', raw: '' };
+  const nextDay = mentionsNextDay(folded);
+  if (folded === '中午') return { iso: '12:00', raw: '', nextDay };
   const pm = /下午|晚上|傍晚|pm/i.test(folded);
   const am = /上午|早上|清晨|am/i.test(folded);
   const noon = folded.includes('中午');
   const half = /點半|时半/.test(folded);
-  const body = folded.replace(/上午|早上|清晨|下午|晚上|傍晚|中午|am|pm/ig, '');
+  const body = folded.replace(/上午|早上|清晨|下午|晚上|傍晚|中午|am|pm/ig, '').replace(/隔天|翌日|次日|第二天|\+1|＋1|抵達|到達|出發/g, '');
   let hour;
   let minute;
   const clock = body.match(/^(\d{1,2}):(\d{2})/);
@@ -627,14 +651,22 @@ function parseLooseTime(value) {
     hour = Number(bare[1]);
     minute = half ? 30 : 0;
   } else {
-    return { iso: '', raw: original };
+    return { iso: '', raw: original, nextDay };
   }
   if (half && spoken && spoken[2] == null) minute = 30;
   if (noon && hour < 12 && !pm && !am) hour = 12;
   if (pm && hour < 12) hour += 12;
   if (am && hour === 12) hour = 0;
-  if (hour > 23 || minute > 59) return { iso: '', raw: original };
-  return { iso: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`, raw: '' };
+  if (hour > 23 || minute > 59) return { iso: '', raw: original, nextDay };
+  return { iso: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`, raw: '', nextDay };
+}
+
+function settleEndDate(startDate, startTime, endTime, explicitDate, nextDay) {
+  if (explicitDate && startDate && explicitDate > startDate) return explicitDate;
+  if (explicitDate && startDate && explicitDate < startDate) return '';
+  if (!startDate) return '';
+  if (nextDay || (startTime && endTime && endTime < startTime)) return addDays(startDate, 1);
+  return '';
 }
 
 function oneOf(value, list, fallback) {
@@ -667,12 +699,20 @@ function cleanExtraction(raw, trip) {
     }).filter((c) => c.name),
     activities: list(src.activities).map((a) => {
       const date = dateOf(a?.date);
-      const time = timeOf(a?.time);
+      const span = splitTimeSpan(a?.time);
+      const time = timeOf(span ? span[0] : a?.time);
+      const end = timeOf(a?.endTime || (span ? span[1] : ''));
+      const explicitEnd = dateOf(a?.endDate);
+      const endDate = settleEndDate(date.iso, time.iso, end.iso, explicitEnd.iso, end.nextDay || mentionsNextDay(a?.time) || mentionsNextDay(a?.endTime));
       return {
         date: date.iso,
         dateRaw: date.raw,
         time: time.iso,
         timeRaw: time.raw,
+        endTime: end.iso,
+        endTimeRaw: end.raw,
+        endDate,
+        endDateRaw: endDate ? '' : explicitEnd.raw,
         name: clipText(a?.name, 80),
         location: clipText(a?.location, 200),
       };
@@ -708,6 +748,14 @@ function cleanExtraction(raw, trip) {
       const date = dateOf(t?.date);
       const depart = timeOf(t?.depart);
       const arrive = timeOf(t?.arrive);
+      const explicitEnd = dateOf(t?.arriveDate);
+      const arriveDate = settleEndDate(
+        date.iso,
+        depart.iso,
+        arrive.iso,
+        explicitEnd.iso,
+        arrive.nextDay || mentionsNextDay(t?.arrive) || mentionsNextDay(t?.note),
+      );
       return {
         date: date.iso,
         dateRaw: date.raw,
@@ -718,6 +766,8 @@ function cleanExtraction(raw, trip) {
         departRaw: depart.raw,
         arrive: arrive.iso,
         arriveRaw: arrive.raw,
+        arriveDate,
+        arriveDateRaw: arriveDate ? '' : explicitEnd.raw,
         note: clipText(t?.note, 200),
       };
     }).filter((t) => t.from || t.to),
@@ -764,6 +814,8 @@ function importContext(trip) {
   return [
     '你是旅行行程整理助手。請只根據使用者提供的文字、截圖或 PDF 抽出實際出現的行程，不要捏造。',
     '日期一定要輸出 YYYY-MM-DD，時間一定要輸出 24 小時制 HH:MM。無法判斷的欄位留空字串，不要輸出 11/3、中文日期或上午下午。',
+    '跨過午夜的交通（夜車、臥鋪、夜巴士、渡輪、紅眼航班）：date 與 depart 是出發日和出發時間，arrive 是抵達時間，arriveDate 是抵達日。看到隔天、翌日、次日或 +1，或抵達時間早於出發時間，arriveDate 填出發日的下一天。同一天抵達則 arriveDate 留空。',
+    '跨過午夜的活動：time 是開始時間，endTime 是結束時間，endDate 是結束日。同一天結束則 endTime 可填、endDate 留空。隔天結束就填下一天。',
     '餐別只能是 早餐、午餐、晚餐、其他。交通類型只能是 飛機、火車、巴士、租車、其他。',
     '活動的 name 是「做什麼」，location 是「在哪裡」。住宿填入住與退房日期。',
     '國家名稱請優先用：台灣、日本、韓國、香港、中國、澳洲、紐西蘭、法國、德國、瑞士、泰國。城市請改寫成所屬國家。',
