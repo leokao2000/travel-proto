@@ -645,10 +645,31 @@ function normalizeTrip(trip) {
 function adoptTrip(trip) {
   state.trip = normalizeTrip(trip);
   state.lastSync = new Date(trip.updatedAt).getTime();
+  rememberTrip(state.trip);
+}
+
+function rememberTrip(trip) {
+  if (!trip?.id || !('caches' in window)) return;
+  caches.open('leo-last-trip').then((cache) => {
+    cache.put(`/offline-trip/${trip.id}`, new Response(JSON.stringify(trip), { headers: { 'Content-Type': 'application/json' } }));
+  }).catch(() => {});
+}
+
+async function recallTrip(id) {
+  if (!id || !('caches' in window)) return null;
+  try {
+    const cache = await caches.open('leo-last-trip');
+    const res = await cache.match(`/offline-trip/${id}`);
+    if (!res) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
 }
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
+    cache: 'no-store',
     headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) },
     ...opts,
   });
@@ -682,7 +703,6 @@ let saveChain = Promise.resolve();
 function saveTrip(patch) {
   const run = async () => {
     if (!state.trip) return;
-    if (navigator.onLine === false) throw new Error('離線時無法修改，以免蓋過旅伴的更新');
     const body = {
       memberId: state.memberId,
       title: patch.title ?? state.trip.title,
@@ -713,7 +733,7 @@ function saveTrip(patch) {
 function startPolling() {
   clearInterval(state.pollTimer);
   state.pollTimer = setInterval(async () => {
-    if (!state.trip) return;
+    if (!state.trip || document.querySelector('.modal-backdrop')) return;
     try {
       const data = await api(`/api/trips/${state.trip.id}?since=${state.lastSync}`);
       if (!data.unchanged && data.trip) {
@@ -937,13 +957,41 @@ function stayStatus(lodging, date) {
   return '住宿中';
 }
 
+function lodgingCovers(lodging, day, includeCheckout) {
+  const start = calendarDate(lodging.checkIn);
+  const end = calendarDate(lodging.checkOut);
+  if (!day || !start || !end || end < start) return false;
+  if (start === end) return day === start;
+  if (includeCheckout) return day >= start && day <= end;
+  return day >= start && day < end;
+}
+
 function lodgingOn(date) {
   const day = calendarDate(date);
-  if (!day) return [];
-  return (state.trip.lodgings || []).filter((l) => {
-    const start = calendarDate(l.checkIn);
-    const end = calendarDate(l.checkOut);
-    return start && end && end >= start && day >= start && day <= end;
+  const all = state.trip?.lodgings || [];
+  return all.filter((lodging) => {
+    if (!lodgingCovers(lodging, day, false)) return false;
+    const start = calendarDate(lodging.checkIn);
+    const end = calendarDate(lodging.checkOut);
+    if (start === end) {
+      const shadowed = all.some((other) => other !== lodging && String(other.name || '').trim() === String(lodging.name || '').trim() && calendarDate(other.checkOut) === day && calendarDate(other.checkIn) < day);
+      if (shadowed) return false;
+    }
+    return true;
+  });
+}
+
+function lodgingCheckoutOn(date) {
+  const day = calendarDate(date);
+  const seen = new Set();
+  return (state.trip?.lodgings || []).filter((lodging) => {
+    const start = calendarDate(lodging.checkIn);
+    const end = calendarDate(lodging.checkOut);
+    if (!start || !end || !(end > start) || day !== end) return false;
+    const key = `${String(lodging.name || '').trim()}|${end}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
   });
 }
 
@@ -1047,6 +1095,7 @@ function renderTimeline() {
       <div class="row">
         <h2 style="margin:0;flex:1">行程時間軸</h2>
         <button type="button" class="secondary slim" id="btn-trip-map">整趟地圖</button>
+        <button type="button" class="secondary slim" id="btn-export-pdf">匯出 PDF</button>
       </div>
       <div class="block-toggles" role="group" aria-label="顯示分類">
         ${blockToggleHtml('activity', '活動', counts.activity, prefs.activity)}
@@ -1059,6 +1108,7 @@ function renderTimeline() {
         const actNext = activitiesContinuing(date);
         const foods = sortedByTime((trip.restaurants || []).filter((r) => r.date === date), 'time');
         const stays = lodgingOn(date);
+        const checkouts = lodgingCheckoutOn(date);
         const rides = sortedByTime((trip.transports || []).filter((r) => r.date === date), 'depart');
         const rideNext = ridesContinuing(date).filter((r) => calendarDate(r.date) !== date);
         const nightRide = (trip.transports || []).find((r) => calendarDate(r.date) === date && rideIsOvernight(r));
@@ -1171,7 +1221,14 @@ function renderTimeline() {
                     ${placesCardHtml(l, query, 'stay')}
                   </div>
                 `;
-                }).join('') || ((hasNightBed || nightRide || (!stays.length && morningRide)) ? '' : '<div class="empty-line">尚無住宿</div>')}
+                }).join('')}
+                ${checkouts.map((l) => `
+                  <div class="checkout-line">
+                    <span class="pill">退房</span>
+                    <span>${escapeHtml(l.name || '（未命名）')}</span>
+                    <button class="ghost" type="button" data-edit-stay="${l.id}">改</button>
+                  </div>
+                `).join('') || ((stays.length || hasNightBed || nightRide || (!stays.length && morningRide)) ? '' : '<div class="empty-line">尚無住宿</div>')}
               </section>
               <section class="block block-ride ${prefs.ride ? '' : 'hidden'}">
                 <div class="block-head">${ICON_RIDE}<h3 class="block-title">交通</h3><button class="secondary slim" type="button" data-add-ride="${date}">新增</button></div>
@@ -1232,6 +1289,7 @@ function renderTimeline() {
   }));
   $('#btn-import')?.addEventListener('click', () => openImportSheet());
   $('#btn-trip-map')?.addEventListener('click', () => openMapSheet(null));
+  $('#btn-export-pdf')?.addEventListener('click', exportTripPdf);
   $$('[data-day-map]', el).forEach((btn) => btn.addEventListener('click', () => openMapSheet(btn.dataset.dayMap)));
   $('#btn-save-device-timeline')?.addEventListener('click', async () => {
     try {
@@ -2987,7 +3045,11 @@ function importRawHint(raw, current) {
 }
 
 function importField(idx, field, label, value, type = 'text', raw = '') {
-  return `<label>${label}</label><input data-idx="${idx}" data-field="${field}" type="${type}" value="${escapeHtml(value || '')}" />${importRawHint(raw, value)}`;
+  const unparsed = Boolean(raw) && !value && (type === 'date' || type === 'time');
+  const inputType = unparsed ? 'text' : type;
+  const shown = value || (unparsed ? raw : '');
+  const placeholder = unparsed ? (type === 'date' ? 'YYYY-MM-DD' : 'HH:MM') : '';
+  return `<label>${label}</label><input data-idx="${idx}" data-field="${field}" type="${inputType}" value="${escapeHtml(shown)}" ${placeholder ? `placeholder="${placeholder}"` : ''} />${importRawHint(raw, value)}`;
 }
 
 function importSelect(idx, field, label, value, options) {
@@ -3010,7 +3072,10 @@ function importItemHtml(item, idx) {
   const range = item.kind === 'lodging' && item.checkIn ? `<div class="muted">${escapeHtml(item.checkIn)} → ${escapeHtml(item.checkOut || '?')}，確認後會出現在這段每一天</div>` : '';
   return `
     <div class="import-item kind-${item.kind}">
-      <label class="import-check"><input type="checkbox" data-include data-idx="${idx}" ${item.include ? 'checked' : ''} /> ${importKindLabel(item.kind)}</label>
+      <div class="row">
+        <label class="import-check"><input type="checkbox" data-include data-idx="${idx}" ${item.include ? 'checked' : ''} /> ${importKindLabel(item.kind)}</label>
+        <button type="button" class="ghost" data-import-delete="${idx}">刪除</button>
+      </div>
       ${range}
       ${fields}
     </div>
@@ -3055,7 +3120,88 @@ function readImportDraft(root, draft) {
     const item = items[Number(el.dataset.idx)];
     if (item) item[el.dataset.field] = el.value.trim();
   });
-  return items;
+  return items.map(normalizeReviewItem);
+}
+
+function reviewYear() {
+  const dates = [];
+  for (const country of state.trip?.countries || []) {
+    if (country.start) dates.push(country.start);
+    if (country.end) dates.push(country.end);
+  }
+  dates.sort();
+  if (dates[0]) return Number(String(dates[0]).slice(0, 4));
+  return Number(taipeiTodayClient().slice(0, 4));
+}
+
+function coerceReviewDate(value) {
+  const text = String(value || '').trim().replace(/[／]/g, '/').replace(/[－–—]/g, '-');
+  if (!text) return '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
+  const full = text.match(/(\d{4})\s*[年/-]\s*(\d{1,2})\s*[月/-]\s*(\d{1,2})/);
+  if (full) return isoFromParts(Number(full[1]), Number(full[2]), Number(full[3]));
+  const loose = text.match(/(\d{1,2})\s*[月/-]\s*(\d{1,2})/);
+  if (loose) return isoFromParts(reviewYear(), Number(loose[1]), Number(loose[2]));
+  return '';
+}
+
+function isoFromParts(year, month, day) {
+  if (!year || month < 1 || month > 12 || day < 1 || day > 31) return '';
+  const dt = new Date(Date.UTC(year, month - 1, day));
+  if (dt.getUTCMonth() !== month - 1 || dt.getUTCDate() !== day) return '';
+  return dt.toISOString().slice(0, 10);
+}
+
+function coerceReviewTime(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  const match = text.match(/(\d{1,2}):(\d{2})/);
+  if (!match) return '';
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (hour > 23 || minute > 59) return '';
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}
+
+function normalizeReviewItem(item) {
+  const next = { ...item };
+  for (const field of ['date', 'start', 'end', 'checkIn', 'checkOut', 'endDate', 'arriveDate']) {
+    if (next[field]) next[field] = coerceReviewDate(next[field]);
+  }
+  for (const field of ['time', 'endTime', 'depart', 'arrive']) {
+    if (next[field]) next[field] = coerceReviewTime(next[field]);
+  }
+  return next;
+}
+
+function absorbLodging(list, incoming) {
+  const name = String(incoming.name || '').trim();
+  const start = calendarDate(incoming.checkIn);
+  const end = calendarDate(incoming.checkOut);
+  const idx = list.findIndex((lodging) => {
+    if (String(lodging.name || '').trim() !== name) return false;
+    const otherStart = calendarDate(lodging.checkIn);
+    const otherEnd = calendarDate(lodging.checkOut);
+    if (!otherStart || !otherEnd || !start || !end) return false;
+    return otherStart <= end && start <= otherEnd;
+  });
+  if (idx < 0) {
+    list.push(incoming);
+    return 'add';
+  }
+  const prev = list[idx];
+  const checkIn = calendarDate(prev.checkIn) < start ? prev.checkIn : incoming.checkIn;
+  const checkOut = calendarDate(prev.checkOut) > end ? prev.checkOut : incoming.checkOut;
+  if (calendarDate(prev.checkIn) === checkIn && calendarDate(prev.checkOut) === calendarDate(checkOut) && calendarDate(checkIn) === start && calendarDate(checkOut) === end) return 'dup';
+  list[idx] = {
+    ...prev,
+    checkIn,
+    checkOut,
+    place: prev.place || incoming.place,
+    address: prev.address || incoming.address,
+    note: prev.note || incoming.note,
+  };
+  return 'merge';
 }
 
 function importSkipLabel(item) {
@@ -3099,7 +3245,17 @@ async function commitImport(draft) {
       if (!item.name) { skip(item, '缺名稱'); continue; }
       if (!item.checkIn || !item.checkOut) { skip(item, '缺日期'); continue; }
       if (item.checkOut < item.checkIn) { skip(item, '退房早於入住'); continue; }
-      lodgings.push({ id: uid(), name: item.name.slice(0, 80), checkIn: item.checkIn, checkOut: item.checkOut, place: (item.address || '').slice(0, 200), note: (item.note || '').slice(0, 200) });
+      const record = {
+        id: uid(),
+        name: item.name.slice(0, 80),
+        checkIn: item.checkIn,
+        checkOut: item.checkOut,
+        place: (item.address || item.place || '').slice(0, 200),
+        address: (item.address || '').slice(0, 200),
+        note: (item.note || '').slice(0, 200),
+      };
+      const merged = absorbLodging(lodgings, record);
+      if (merged === 'dup') { skip(item, '與現有住宿重複'); continue; }
       added += 1;
     } else if (item.kind === 'transport') {
       if (!item.from && !item.to) { skip(item, '缺起訖'); continue; }
@@ -3342,11 +3498,12 @@ function openImportSheet() {
     return remember ? savedKey() : '';
   }
 
-  function showReview(extraction, mock, notices) {
-    draft = importDraftFrom(extraction);
+  let reviewMeta = { mock: false, notices: [] };
+  function paintReview() {
     $('#import-body', wrap).innerHTML = `
-      ${mock ? '<div class="muted">這是範例資料，沒有呼叫 OpenAI。</div>' : ''}
-      ${(notices || []).map((note) => `<div class="muted">${escapeHtml(note)}</div>`).join('')}
+      ${reviewMeta.mock ? '<div class="muted">這是範例資料，沒有呼叫 OpenAI。</div>' : ''}
+      <div class="muted">每一列都可以直接改。日期請用 YYYY-MM-DD，時間用 HH:MM。刪掉不需要的列後再確認。</div>
+      ${(reviewMeta.notices || []).map((note) => `<div class="muted">${escapeHtml(note)}</div>`).join('')}
       ${importReviewHtml(draft)}
       <div class="actions">
         <button class="secondary" type="button" id="import-back">返回</button>
@@ -3354,6 +3511,11 @@ function openImportSheet() {
       </div>
     `;
     $('#import-back', wrap).addEventListener('click', () => showForm(wrap._status));
+    $$('[data-import-delete]', wrap).forEach((btn) => btn.addEventListener('click', () => {
+      draft = readImportDraft($('#import-body', wrap), draft);
+      draft.splice(Number(btn.dataset.importDelete), 1);
+      paintReview();
+    }));
     $('#import-confirm', wrap).addEventListener('click', async () => {
       const btn = $('#import-confirm', wrap);
       btn.disabled = true;
@@ -3368,6 +3530,11 @@ function openImportSheet() {
         toast(err.message || '匯入失敗', String(err.message || '').includes('略過') ? 7000 : 2200);
       }
     });
+  }
+  function showReview(extraction, mock, notices) {
+    draft = importDraftFrom(extraction);
+    reviewMeta = { mock: Boolean(mock), notices: notices || [] };
+    paintReview();
   }
 
   async function runImport(mock) {
@@ -3600,7 +3767,7 @@ function collectMapPoints(onlyDate) {
         ref: { kind: 'restaurant', id: restaurant.id },
       });
     }
-    for (const lodging of lodgingOn(day)) {
+    for (const lodging of [...lodgingOn(day), ...lodgingCheckoutOn(day)]) {
       if (!onlyDate && seenLodging.has(lodging.id)) continue;
       if (!onlyDate) seenLodging.add(lodging.id);
       const onCheckIn = calendarDate(lodging.checkIn) === day;
@@ -3800,6 +3967,49 @@ function mapListHtml(points) {
   }).join('');
 }
 
+function buildPrintHtml() {
+  const trip = state.trip;
+  const days = buildTimelineDays();
+  const { lines } = computeSettlement();
+  const dayHtml = days.map(([date]) => {
+    const acts = sortedByTime(trip.days?.[date] || [], 'time');
+    const foods = sortedByTime((trip.restaurants || []).filter((item) => item.date === date), 'time');
+    const nights = lodgingOn(date);
+    const checkouts = lodgingCheckoutOn(date);
+    const rides = (trip.transports || []).filter((ride) => calendarDate(ride.date) === date || calendarDate(ride.arriveDate) === date);
+    const blocks = [
+      ...nights.map((item) => `<div class="print-item"><strong>住宿</strong> ${escapeHtml(item.name || '')} <span>${escapeHtml(stayStatus(item, date))}</span></div>`),
+      ...checkouts.map((item) => `<div class="print-item"><strong>退房</strong> ${escapeHtml(item.name || '')}</div>`),
+      ...(nightLodging(date) ? [] : (trip.transports || []).filter((ride) => calendarDate(ride.date) === date && rideIsOvernight(ride)).map((ride) => `<div class="print-item"><strong>${overnightStayTitle(ride)}</strong> ${escapeHtml(ride.from || '')} → ${escapeHtml(ride.to || '')} ${escapeHtml(rideScheduleText(ride, false))}</div>`)),
+      ...acts.map((item) => `<div class="print-item"><strong>活動</strong> ${escapeHtml(activityScheduleText(item, date, false))} ${escapeHtml(activityName(item))}${item.place ? ` · ${escapeHtml(item.place)}` : ''}</div>`),
+      ...foods.map((item) => `<div class="print-item"><strong>餐廳</strong> ${item.time ? `${escapeHtml(item.time)} ` : ''}${escapeHtml(item.name || '')}${item.place ? ` · ${escapeHtml(item.place)}` : ''}</div>`),
+      ...rides.map((ride) => `<div class="print-item"><strong>交通</strong> ${escapeHtml(ride.type || '')} ${escapeHtml(ride.from || '')} → ${escapeHtml(ride.to || '')} ${escapeHtml(rideScheduleText(ride, calendarDate(ride.date) !== date))}</div>`),
+    ];
+    return `<section class="print-day"><h2>${escapeHtml(date)}（週${weekday(date)}）</h2>${blocks.join('') || '<div class="print-item">這天沒有行程</div>'}</section>`;
+  }).join('');
+  const money = lines.length ? lines.map((line) => `<div class="print-item">${escapeHtml(memberName(line.from))} → ${escapeHtml(memberName(line.to))} NT$${Math.round(line.amount).toLocaleString('zh-TW')}</div>`).join('') : '<div class="print-item">目前沒有待結算</div>';
+  const first = days[0]?.[0] || '';
+  const last = days[days.length - 1]?.[0] || '';
+  return `
+    <h1>${escapeHtml(trip.title || '')}</h1>
+    <p>${escapeHtml(first)}${last && last !== first ? ` – ${escapeHtml(last)}` : ''} · ${trip.members.map((m) => escapeHtml(m.nickname)).join('、')}</p>
+    ${dayHtml || '<p>尚無日期</p>'}
+    <h2>結算</h2>
+    ${money}
+  `;
+}
+
+function exportTripPdf() {
+  let root = document.getElementById('print-root');
+  if (!root) {
+    root = document.createElement('div');
+    root.id = 'print-root';
+    document.body.appendChild(root);
+  }
+  root.innerHTML = buildPrintHtml();
+  window.print();
+}
+
 async function openMapSheet(date) {
   const wrap = document.createElement('div');
   wrap.className = 'modal-backdrop';
@@ -3911,6 +4121,13 @@ async function boot() {
       maybeWelcomeTheme();
       return;
     } catch (_) {
+      const cached = await recallTrip(state.tripId);
+      if (cached) {
+        adoptTrip(cached);
+        showOfflineBanner(true);
+        showApp();
+        return;
+      }
       localStorage.removeItem('tp_tripId');
       localStorage.removeItem('tp_memberId');
       state.tripId = null;
