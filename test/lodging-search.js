@@ -17,6 +17,24 @@ const hotel = sandbox.toLodgingHit({
 });
 assert.strictEqual(hotel.name, '岡山シティホテル厚生町');
 assert.ok(hotel.address.includes('岡山市'));
+const chinese = sandbox.toLodgingHit({
+  category: 'tourism', type: 'hotel', lat: '34.66', lon: '133.93',
+  namedetails: {
+    name: 'ダイワロイネットホテル',
+    'name:ja': 'ダイワロイネットホテル',
+    'name:zh': '大和ROYNET酒店',
+    'name:zh-TW': '大和羅伊奈特酒店',
+  },
+  address: { city: '岡山市', province: '岡山縣' },
+});
+assert.strictEqual(chinese.name, '大和羅伊奈特酒店');
+assert.ok(chinese.address.includes('岡山縣'));
+const localOnly = sandbox.toLodgingHit({
+  category: 'tourism', type: 'hotel', lat: '34.67', lon: '133.92',
+  namedetails: { name: 'ダイワロイネットホテル', 'name:ja': 'ダイワロイネットホテル', 'name:en': 'Daiwa Roynet Hotel' },
+  address: { city: '岡山市' },
+});
+assert.strictEqual(localOnly.name, 'ダイワロイネットホテル');
 assert.ok(Math.abs(hotel.lat - 34.656) < 0.001);
 
 for (const type of ['guest_house', 'hostel', 'motel', 'apartment', 'chalet']) {

@@ -45,4 +45,18 @@ assert.ok(!src.includes('id="g-return-date"'), 'separate return date input shoul
 assert.ok(src.includes('data-date'), 'range calendar should commit a tapped day');
 assert.ok(src.includes('guideStepError(step, guide)'), 'next should validate the committed guide, not a date input');
 
+const appSrc = fs.readFileSync(path.join(__dirname, '../public/app.js'), 'utf8');
+const dayStart = appSrc.indexOf('function formatMonthDay');
+const dayEnd = appSrc.indexOf('function emptyFlights');
+assert.ok(dayStart >= 0 && dayEnd > dayStart);
+const days = {};
+vm.runInNewContext(appSrc.slice(dayStart, dayEnd), days);
+assert.strictEqual(days.formatMonthDay('2026-12-12'), '12/12');
+assert.strictEqual(days.formatMonthDay('2026-12-05'), '12/05');
+assert.strictEqual(days.formatMonthDay(''), '');
+assert.ok(appSrc.includes('前一天') && appSrc.includes('後一天'));
+assert.ok(appSrc.includes('第 ${index + 1} / ${total} 天'));
+assert.ok(!appSrc.includes('date.slice(5)'));
+assert.ok(appSrc.includes('搜尋住宿（選用）'));
+assert.ok(appSrc.indexOf('id="stay-address"') < appSrc.indexOf('搜尋住宿（選用）'));
 console.log('guide dates ok');

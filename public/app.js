@@ -221,6 +221,12 @@ function weekday(dateStr) {
   return names[new Date(dateStr + 'T12:00:00').getDay()];
 }
 
+function formatMonthDay(iso) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || ''));
+  if (!match) return '';
+  return `${match[2]}/${match[3]}`;
+}
+
 function emptyFlights() {
   const leg = () => ({ number: '', date: '', from: '', to: '', depart: '', arrive: '' });
   return { outbound: leg(), inbound: leg() };
@@ -359,7 +365,7 @@ function legSummary(leg) {
   if (!leg) return '尚未填寫';
   const parts = [];
   if (leg.number) parts.push(leg.number);
-  if (leg.date) parts.push(leg.date);
+  if (leg.date) parts.push(formatMonthDay(leg.date) || leg.date);
   if (leg.from || leg.to) parts.push(`${leg.from || '—'} → ${leg.to || '—'}`);
   if (leg.depart || leg.arrive) parts.push(`${leg.depart || '—'} 起飛 · ${leg.arrive || '—'} 抵達`);
   return parts.length ? parts.join(' · ') : '尚未填寫';
@@ -919,7 +925,7 @@ function rideScheduleText(ride, continuation) {
   const end = effectiveArriveDate(ride);
   if (continuation) return ride?.arrive ? `${ride.arrive} 抵達` : '隔天續';
   if (rideIsOvernight(ride)) {
-    const when = end === shiftDate(start, 1) ? '隔天' : end;
+    const when = end === shiftDate(start, 1) ? '隔天' : (formatMonthDay(end) || end);
     const tail = ride.arrive ? `${when} ${ride.arrive} 抵達` : `${when}抵達`;
     return `${ride.depart ? `${ride.depart} 出發 ` : ''}→ ${tail}`;
   }
@@ -933,7 +939,7 @@ function activityScheduleText(activity, startDate, continuation) {
   if (continuation) return activity?.endTime ? `${activity.endTime} 結束` : '隔天續';
   const end = effectiveActivityEnd(activity, startDate);
   if (activityIsOvernight(activity, startDate) && activity?.endTime) {
-    const when = end === shiftDate(startDate, 1) ? '隔天' : end;
+    const when = end === shiftDate(startDate, 1) ? '隔天' : (formatMonthDay(end) || end);
     return `${activity.time || ''}–${when} ${activity.endTime}`.replace(/^–/, '');
   }
   if (activity?.endTime) return `${activity.time ? `${activity.time}–` : ''}${activity.endTime}`;
@@ -1081,7 +1087,7 @@ function renderTimeline() {
                 </span>
               </div>
               <div class="muted">${escapeHtml(c.tz)} · ${escapeHtml(offsetForStay(c.tz, c.start, c.end))}</div>
-              <div class="muted">${c.start || '?'} → ${c.end || '?'} · 幣別 ${c.currency || '—'}</div>
+              <div class="muted">${formatMonthDay(c.start) || '?'} → ${formatMonthDay(c.end) || '?'} · 幣別 ${c.currency || '—'}</div>
             </div>
           </div>
         `).join('') || '<div class="muted">尚未加入國家</div>'}
@@ -1113,7 +1119,7 @@ function renderTimeline() {
         ${blockToggleHtml('stay', '住宿', counts.stay, prefs.stay)}
         ${blockToggleHtml('ride', '交通', counts.ride, prefs.ride)}
       </div>
-      ${days.length ? `<div class="day-pager" id="day-pager">${days.map(([date, countries]) => {
+      ${days.length ? `${dayNavHtml(days.map(([date]) => date), 'day-pager')}<div class="day-pager" id="day-pager">${days.map(([date, countries]) => {
         const acts = sortedByTime(trip.days?.[date] || [], 'time');
         const actNext = activitiesContinuing(date);
         const foods = sortedByTime((trip.restaurants || []).filter((r) => r.date === date), 'time');
@@ -1125,11 +1131,11 @@ function renderTimeline() {
         const morningRide = rideNext[0];
         const hasNightBed = !!nightLodging(date);
         return `
-          <div class="day">
+          <div class="day" data-day-date="${date}">
             ${countries[0] ? `<div class="day-mark">${renderPattern(countries[0], 2, 'bg')}</div>` : ''}
             <div class="day-head">
               <div>
-                <strong>${date}（週${weekday(date)}）</strong>
+                <strong>${formatMonthDay(date)}（週${weekday(date)}）</strong>
                 <div>${countries.map((c) => `<button type="button" class="chip" data-chip-date="${date}" data-country-key="${escapeHtml(countryKey(c))}" aria-label="更改${escapeHtml(c.name)}">${renderPattern(c, 1, 'sm')}${escapeHtml(c.name)} ${escapeHtml(offsetLabel(c.tz, date))}</button>`).join(' ')}</div>
               </div>
               <button class="ghost" data-day-map="${date}" type="button">地圖</button>
@@ -1219,7 +1225,7 @@ function renderTimeline() {
                     <div class="block-card-top">
                       <div>
                         <strong>${escapeHtml(l.name || '（未命名）')}</strong><span class="pill">${stayStatus(l, date)}</span>
-                        <div class="muted">${escapeHtml(calendarDate(l.checkIn) || l.checkIn)} → ${escapeHtml(calendarDate(l.checkOut) || l.checkOut)}${l.countryName ? ` · ${escapeHtml(l.countryName)}` : ''}</div>
+                        <div class="muted">${escapeHtml(formatMonthDay(l.checkIn) || l.checkIn)} → ${escapeHtml(formatMonthDay(l.checkOut) || l.checkOut)}${l.countryName ? ` · ${escapeHtml(l.countryName)}` : ''}</div>
                       </div>
                       <div class="item-actions">
                         <button class="ghost" type="button" data-edit-stay="${l.id}">改</button>
@@ -1305,6 +1311,7 @@ function renderTimeline() {
   $('#btn-open-guide')?.addEventListener('click', () => openGuide(state.trip.guide?.step || 0));
   $$('[data-open-guide]', el).forEach((btn) => btn.addEventListener('click', () => openGuide(state.trip.guide?.step || 0)));
   bindSpotDrag(el);
+  bindDayNav(el);
   $$('[data-day-map]', el).forEach((btn) => btn.addEventListener('click', () => openMapSheet(btn.dataset.dayMap)));
   $('#btn-save-device-timeline')?.addEventListener('click', async () => {
     try {
@@ -2480,7 +2487,7 @@ function openDayCountrySheet(country, date) {
         <label class="scope-choice"><input type="radio" name="day-scope" value="one" checked /> 只改這一天</label>
         <label class="scope-choice"><input type="radio" name="day-scope" value="some" /> 選擇幾天</label>
         <div id="day-checks" hidden>
-          ${days.map((item) => `<label class="day-check"><input type="checkbox" data-day-check value="${item}" ${item === day ? 'checked' : ''} /> ${item}（週${weekday(item)}）</label>`).join('')}
+          ${days.map((item) => `<label class="day-check"><input type="checkbox" data-day-check value="${item}" ${item === day ? 'checked' : ''} /> ${formatMonthDay(item)}（週${weekday(item)}）</label>`).join('')}
         </div>
         <label class="scope-choice"><input type="radio" name="day-scope" value="all" /> 全部天數</label>
       </div>
@@ -2640,19 +2647,22 @@ function stayFormHtml(value = {}) {
     <input type="date" id="stay-in" value="${escapeHtml(calendarDate(value.checkIn) || '')}" />
     <label>退房</label>
     <input type="date" id="stay-out" value="${escapeHtml(calendarDate(value.checkOut) || '')}" />
-    <label>地點（用來搜尋）</label>
-    <input id="stay-place" maxlength="200" placeholder="城市或飯店，例如：日本岡山" value="${escapeHtml(value.place || '')}" autocomplete="off" enterkeyhint="search" />
-    <div id="stay-suggest" class="suggest-list" hidden></div>
-    <input type="hidden" id="stay-lat" value="${escapeHtml(value.lat ?? '')}" />
-    <input type="hidden" id="stay-lng" value="${escapeHtml(value.lng ?? '')}" />
     <label>地址</label>
-    <input id="stay-address" maxlength="200" placeholder="可留空，選定分店後會自動帶入" value="${escapeHtml(value.address || '')}" />
+    <input id="stay-address" maxlength="200" placeholder="街道、城市，可以直接打" value="${escapeHtml(value.address || '')}" />
     <label>電話</label>
-    <input id="stay-phone" type="tel" maxlength="40" placeholder="可留空，選定分店後會自動帶入" value="${escapeHtml(value.phone || '')}" />
-    <label>Google 地圖連結</label>
-    <input id="stay-maps" maxlength="500" placeholder="可留空，選定分店後會自動帶入" value="${escapeHtml(value.mapsUrl || '')}" />
+    <input id="stay-phone" type="tel" maxlength="40" placeholder="可留空" value="${escapeHtml(value.phone || '')}" />
     <label>訂房／確認碼備註</label>
     <input id="stay-note" maxlength="200" placeholder="確認碼、房型…" value="${escapeHtml(value.note || '')}" />
+    <label>Google 地圖連結</label>
+    <input id="stay-maps" maxlength="500" placeholder="可留空" value="${escapeHtml(value.mapsUrl || '')}" />
+    <details class="stay-search">
+      <summary>搜尋住宿（選用）</summary>
+      <label>地點或飯店名</label>
+      <input id="stay-place" maxlength="200" placeholder="例如：日本岡山" value="${escapeHtml(value.place || '')}" autocomplete="off" enterkeyhint="search" />
+      <div id="stay-suggest" class="suggest-list" hidden></div>
+    </details>
+    <input type="hidden" id="stay-lat" value="${escapeHtml(value.lat ?? '')}" />
+    <input type="hidden" id="stay-lng" value="${escapeHtml(value.lng ?? '')}" />
     <input type="hidden" id="stay-country" value="${escapeHtml(value.countryName || '')}" />
   `;
 }
@@ -3715,9 +3725,63 @@ function tripSpanLabel(start, end) {
 }
 
 function formatGuideDay(iso) {
-  const part = parseIsoDate(iso);
-  if (!part) return '';
-  return `${part.m}/${part.d}（週${weekday(iso)}）`;
+  const shown = formatMonthDay(iso);
+  if (!shown) return '';
+  return `${shown}（週${weekday(iso)}）`;
+}
+
+function dayPositionLabel(index, total, iso) {
+  const shown = formatMonthDay(iso);
+  return `第 ${index + 1} / ${total} 天 · ${shown}${shown ? `（週${weekday(iso)}）` : ''}`;
+}
+
+function dayNavHtml(dates, pagerId) {
+  if (!dates.length) return '';
+  return `<div class="day-nav" data-day-nav-for="${pagerId}">
+    <div class="day-nav-label">${escapeHtml(dayPositionLabel(0, dates.length, dates[0]))}</div>
+    <button type="button" data-day-step="-1" disabled>前一天</button>
+    <button type="button" data-day-step="1" ${dates.length < 2 ? 'disabled' : ''}>後一天</button>
+  </div>`;
+}
+
+function bindDayNav(root) {
+  $$('[data-day-nav-for]', root).forEach((nav) => {
+    const pager = root.querySelector(`#${nav.dataset.dayNavFor}`);
+    if (!pager) return;
+    const pages = [...pager.children].filter((node) => node.classList.contains('day'));
+    const prev = nav.querySelector('[data-day-step="-1"]');
+    const next = nav.querySelector('[data-day-step="1"]');
+    const label = nav.querySelector('.day-nav-label');
+    const indexOf = () => {
+      const left = pager.scrollLeft;
+      let best = 0;
+      let bestDist = Infinity;
+      pages.forEach((page, index) => {
+        const dist = Math.abs(page.offsetLeft - left);
+        if (dist < bestDist) {
+          best = index;
+          bestDist = dist;
+        }
+      });
+      return best;
+    };
+    const sync = () => {
+      const index = indexOf();
+      const iso = pages[index]?.dataset.dayDate || '';
+      if (label) label.textContent = dayPositionLabel(index, pages.length, iso);
+      if (prev) prev.disabled = index <= 0;
+      if (next) next.disabled = index >= pages.length - 1;
+    };
+    const go = (delta) => {
+      const index = Math.max(0, Math.min(pages.length - 1, indexOf() + delta));
+      const page = pages[index];
+      if (page) pager.scrollTo({ left: page.offsetLeft, behavior: 'smooth' });
+    };
+    prev?.addEventListener('click', () => go(-1));
+    next?.addEventListener('click', () => go(1));
+    pager.addEventListener('scroll', sync, { passive: true });
+    sync();
+  });
 }
 
 function guideStepError(step, guide) {
@@ -3822,7 +3886,7 @@ function spotPlacerHtml() {
   if (!spot) return '';
   const days = buildTimelineDays().map(([date]) => date);
   const dayButtons = days.length
-    ? days.map((date) => `<button type="button" data-place-day="${date}">${date.slice(5)}</button>`).join('')
+    ? days.map((date) => `<button type="button" data-place-day="${date}">${formatMonthDay(date)}</button>`).join('')
     : '<span class="muted">先設定出發與回程</span>';
   return `<div class="spot-placer"><div>「${escapeHtml(spot.name)}」要放哪一天？點日期，或點上面的某一天。</div><div class="placer-days">${dayButtons}<button type="button" data-place-pool>放回景點池</button></div></div>`;
 }
@@ -3843,9 +3907,10 @@ function spotDayHtml(date) {
 function arrangeDaysHtml() {
   const days = buildTimelineDays();
   if (!days.length) return '<div class="muted">先設定出發與回程，才有日期可以排。</div>';
-  return `<div class="day-pager wizard-days">${days.map(([date]) => `
-    <section class="day">
-      <strong>${date}（週${weekday(date)}）</strong>
+  const dates = days.map(([date]) => date);
+  return `${dayNavHtml(dates, 'wizard-day-pager')}<div class="day-pager wizard-days" id="wizard-day-pager">${days.map(([date]) => `
+    <section class="day" data-day-date="${date}">
+      <strong>${formatMonthDay(date)}（週${weekday(date)}）</strong>
       ${spotDayHtml(date)}
     </section>`).join('')}</div>`;
 }
@@ -4038,11 +4103,11 @@ function openGuide(startStep) {
     } else if (step === 2) {
       pane.innerHTML = `<h3>出發與回來</h3>${rangeCalendarHtml(calView, guide.departDate, guide.returnDate)}<button type="button" class="secondary" id="g-ai">這樣排會不會太趕</button>`;
     } else if (step === 3) {
-      pane.innerHTML = `<h3>住宿訂了嗎？</h3><div class="mode-grid"><button type="button" data-stay="yes" class="${guide.lodgingChoice === 'yes' ? 'on' : ''}">訂好了</button><button type="button" data-stay="no" class="${guide.lodgingChoice === 'no' ? 'on' : ''}">還沒</button><button type="button" data-stay="later" class="${guide.lodgingChoice === 'later' ? 'on' : ''}">晚點再說</button></div><label>貼上訂房文字</label><textarea id="g-hotel" rows="3" placeholder="飯店名、入住與退房日期"></textarea><button type="button" class="secondary" id="g-hotel-read">讀這段訂房</button><button type="button" class="ghost" id="g-hotel-manual">自己填一間</button><button type="button" class="secondary" id="g-ai">住宿小建議</button>`;
+      pane.innerHTML = `<h3>住宿訂了嗎？</h3><div class="mode-grid"><button type="button" data-stay="yes" class="${guide.lodgingChoice === 'yes' ? 'on' : ''}">訂好了</button><button type="button" data-stay="no" class="${guide.lodgingChoice === 'no' ? 'on' : ''}">還沒</button><button type="button" data-stay="later" class="${guide.lodgingChoice === 'later' ? 'on' : ''}">晚點再說</button></div><button type="button" id="g-hotel-manual">自己填名稱、日期和地址</button><details class="stay-search"><summary>貼上訂房文字（選用）</summary><label>訂房文字</label><textarea id="g-hotel" rows="3" placeholder="飯店名、入住與退房日期"></textarea><button type="button" class="secondary" id="g-hotel-read">讀這段訂房</button></details><button type="button" class="secondary" id="g-ai">住宿小建議</button>`;
     } else if (step === 4) {
       pane.innerHTML = `<h3>想去的地方</h3><label>搜尋景點</label><input id="g-spot" maxlength="80" placeholder="例如：清水寺" /><button type="button" id="g-spot-add">加入景點池</button><button type="button" class="secondary" id="g-ai">推薦幾個景點</button>${spotPlacerHtml()}<div class="spot-pool" data-drop-pool>${spotsFor('').map(spotChip).join('') || '<div class="muted">還沒有景點</div>'}</div>`;
     } else {
-      pane.innerHTML = `<h3>排進每一天</h3><div class="muted">左右滑看每一天。把景點拖進去，或拖回景點池。</div><button type="button" class="secondary" id="g-ai">幫我排進日期</button>${arrangeDaysHtml()}${spotDockHtml({ guide: false })}`;
+      pane.innerHTML = `<h3>排進每一天</h3><div class="muted">用前一天、後一天切換，也可以左右滑。把景點拖進去，或點一下再選日期。</div><button type="button" class="secondary" id="g-ai">幫我排進日期</button>${arrangeDaysHtml()}${spotDockHtml({ guide: false })}`;
     }
     $$('[data-step]', wrap).forEach((btn) => btn.addEventListener('click', async () => {
       try {
@@ -4099,6 +4164,7 @@ function openGuide(startStep) {
     $('#g-hotel-manual', wrap)?.addEventListener('click', () => openStayModal({ defaults: { checkIn: currentGuide().departDate, checkOut: currentGuide().returnDate, countryName: currentGuide().destination } }));
     $('#g-hotel-read', wrap)?.addEventListener('click', () => readHotelPaste($('#g-hotel', wrap)?.value || ''));
     bindSpotDrag(wrap);
+    bindDayNav(wrap);
   };
   async function collect(strict) {
     const field = $('#g-dest', wrap);
@@ -4761,7 +4827,7 @@ function mapListHtml(points) {
     const number = index >= 0 ? `${index + 1}. ` : '';
     const next = located[index + 1];
     const leg = index >= 0 && next ? `<div class="map-leg">${roughTravelLabel(haversineKm(point, next))}</div>` : '';
-    const when = [point.date, point.time && point.time !== '00:10' && point.time !== '99:50' ? point.time : ''].filter(Boolean).join(' ');
+    const when = [formatMonthDay(point.date), point.time && point.time !== '00:10' && point.time !== '99:50' ? point.time : ''].filter(Boolean).join(' ');
     return `<div class="map-stop"><strong>${number}${escapeHtml(point.label)}</strong> <span class="muted">${escapeHtml(when)}</span>${point.missing ? ' <span class="muted">尚未定位</span>' : ''}<div><a href="${mapsNavUrl(point)}" target="_blank" rel="noopener noreferrer">用 Google 地圖導航</a></div>${leg}</div>`;
   }).join('');
 }
@@ -4784,14 +4850,14 @@ function buildPrintHtml() {
       ...foods.map((item) => `<div class="print-item"><strong>餐廳</strong> ${item.time ? `${escapeHtml(item.time)} ` : ''}${escapeHtml(item.name || '')}${item.place ? ` · ${escapeHtml(item.place)}` : ''}</div>`),
       ...rides.map((ride) => `<div class="print-item"><strong>交通</strong> ${escapeHtml(ride.type || '')} ${escapeHtml(ride.from || '')} → ${escapeHtml(ride.to || '')} ${escapeHtml(rideScheduleText(ride, calendarDate(ride.date) !== date))}</div>`),
     ];
-    return `<section class="print-day"><h2>${escapeHtml(date)}（週${weekday(date)}）</h2>${blocks.join('') || '<div class="print-item">這天沒有行程</div>'}</section>`;
+    return `<section class="print-day"><h2>${escapeHtml(formatMonthDay(date))}（週${weekday(date)}）</h2>${blocks.join('') || '<div class="print-item">這天沒有行程</div>'}</section>`;
   }).join('');
   const money = lines.length ? lines.map((line) => `<div class="print-item">${escapeHtml(memberName(line.from))} → ${escapeHtml(memberName(line.to))} NT$${Math.round(line.amount).toLocaleString('zh-TW')}</div>`).join('') : '<div class="print-item">目前沒有待結算</div>';
   const first = days[0]?.[0] || '';
   const last = days[days.length - 1]?.[0] || '';
   return `
     <h1>${escapeHtml(trip.title || '')}</h1>
-    <p>${escapeHtml(first)}${last && last !== first ? ` – ${escapeHtml(last)}` : ''} · ${trip.members.map((m) => escapeHtml(m.nickname)).join('、')}</p>
+    <p>${escapeHtml(formatMonthDay(first) || '')}${last && last !== first ? ` – ${escapeHtml(formatMonthDay(last))}` : ''} · ${trip.members.map((m) => escapeHtml(m.nickname)).join('、')}</p>
     ${dayHtml || '<p>尚無日期</p>'}
     <h2>結算</h2>
     ${money}

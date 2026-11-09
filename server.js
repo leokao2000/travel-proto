@@ -265,9 +265,22 @@ function isLodgingHit(place) {
 
 function lodgingAddress(place) {
   const address = place?.address || {};
-  const parts = [address.road, address.suburb || address.neighbourhood, address.city || address.town || address.village, address.state].filter(Boolean);
+  const street = [address.road, address.house_number].filter(Boolean).join('');
+  const parts = [street, address.suburb || address.neighbourhood || address.quarter, address.city || address.town || address.village, address.province || address.state].filter(Boolean);
   const line = parts.join('、');
   return String(line || place?.display_name || '').slice(0, 200);
+}
+
+function lodgingDisplayName(place) {
+  const details = place?.namedetails || {};
+  const keys = ['name:zh-TW', 'name:zh-Hant', 'name:zh-HK', 'name:zh', 'name:zh-Hans', 'name:zh-CN'];
+  for (const key of keys) {
+    const value = String(details[key] || '').trim();
+    if (value) return value.slice(0, 80);
+  }
+  const extra = Object.keys(details).find((key) => key.startsWith('name:zh') && String(details[key] || '').trim());
+  if (extra) return String(details[extra]).trim().slice(0, 80);
+  return String(details.name || place?.name || String(place?.display_name || '').split(',')[0] || '').trim().slice(0, 80);
 }
 
 function toLodgingHit(place) {
@@ -275,20 +288,28 @@ function toLodgingHit(place) {
   const lat = Number(place?.lat);
   const lng = Number(place?.lon ?? place?.lng);
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
-  const name = String(place?.namedetails?.name || place?.name || String(place?.display_name || '').split(',')[0] || '').trim().slice(0, 80);
+  const name = lodgingDisplayName(place);
   if (!name) return null;
   return { name, address: lodgingAddress(place), lat, lng, kind: String(place.type || '') };
 }
 
 async function nominatimSearch(params) {
   const base = String(process.env.GEOCODE_API_URL || 'https://nominatim.openstreetmap.org/search').trim();
-  const query = new URLSearchParams({ format: 'jsonv2', addressdetails: '1', namedetails: '1', limit: '8', ...params });
+  const query = new URLSearchParams({
+    format: 'jsonv2',
+    addressdetails: '1',
+    namedetails: '1',
+    'accept-language': 'zh-TW,zh-Hant,zh',
+    limit: '8',
+    ...params,
+  });
   const url = `${base}${base.includes('?') ? '&' : '?'}${query.toString()}`;
   return withGeoSlot(async () => {
     const upstream = await fetch(url, {
       headers: {
         'User-Agent': 'LeoPrototype/1.0 (https://travel-proto.onrender.com)',
         Accept: 'application/json',
+        'Accept-Language': 'zh-TW,zh-Hant;q=0.9,zh;q=0.8',
       },
       signal: AbortSignal.timeout(12000),
     });

@@ -415,10 +415,25 @@ label.file-btn {
 .timeline-head h2 { margin: 0; }
 .timeline-actions { display: flex; flex-wrap: wrap; gap: 0.35rem; }
 .timeline-actions button { flex: none; }
+.day-nav {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+  gap: 0.35rem; margin: 0.15rem 0 0.45rem;
+  position: sticky; top: 0; z-index: 2; background: var(--card); padding: 0.2rem 0;
+}
+.day-nav button {
+  flex: 1; min-height: 44px; padding: 0.35rem 0.7rem;
+  background: #fff; color: var(--ink); border: 1px solid var(--line);
+}
+.day-nav-label { flex: 1 0 100%; text-align: center; font-weight: 700; font-size: 0.95rem; line-height: 1.35; }
 .day-pager {
-  display: flex; gap: 0.7rem; overflow-x: auto;
+  display: flex; gap: 0.7rem; overflow-x: auto; position: relative;
   scroll-snap-type: x mandatory; padding-bottom: 0.4rem;
   scrollbar-width: thin;
+}
+.stay-search { margin-top: 0.7rem; }
+.stay-search summary {
+  min-height: 44px; display: flex; align-items: center; cursor: pointer;
+  color: var(--accent); font-weight: 700;
 }
 .day-pager .day { flex: 0 0 100%; scroll-snap-align: start; }
 .spot-dock {
