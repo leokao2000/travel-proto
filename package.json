@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "test": "node test/spot-distance.js"
+    "test": "node test/spot-distance.js && node test/guide-dates.js"
   },
   "engines": {
     "node": ">=18"

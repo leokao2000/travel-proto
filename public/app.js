@@ -3601,6 +3601,88 @@ function openImportSheet() {
 
 const GUIDE_STEPS = ['目的地', '怎麼去', '往返', '住宿', '景點', '排一天'];
 const GUIDE_MODES = ['飛機', '火車', '巴士', '船', '自駕', '其他'];
+const CAL_WEEKDAYS = ['日', '一', '二', '三', '四', '五', '六'];
+
+function parseIsoDate(iso) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ''));
+  if (!match) return null;
+  const y = Number(match[1]);
+  const m = Number(match[2]);
+  const d = Number(match[3]);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== m - 1 || dt.getUTCDate() !== d) return null;
+  return { y, m, d };
+}
+
+function isoDate(y, m, d) {
+  return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+
+function shiftIsoMonth(y, m, delta) {
+  const dt = new Date(Date.UTC(y, m - 1 + delta, 1));
+  return { y: dt.getUTCFullYear(), m: dt.getUTCMonth() + 1 };
+}
+
+function daysBetweenIso(start, end) {
+  const a = parseIsoDate(start);
+  const b = parseIsoDate(end);
+  if (!a || !b) return null;
+  return Math.round((Date.UTC(b.y, b.m - 1, b.d) - Date.UTC(a.y, a.m - 1, a.d)) / 86400000);
+}
+
+function tripSpanLabel(start, end) {
+  const nights = daysBetweenIso(start, end);
+  if (nights == null || nights < 0) return '';
+  return `${nights + 1} 天 · ${nights} 夜`;
+}
+
+function formatGuideDay(iso) {
+  const part = parseIsoDate(iso);
+  if (!part) return '';
+  return `${part.m}/${part.d}（週${weekday(iso)}）`;
+}
+
+function guideStepError(step, guide) {
+  const src = guide || {};
+  if (step === 0 && !String(src.destination || '').trim()) return '請填目的地';
+  if (step === 1 && !src.transportMode) return '請選一種交通';
+  if (step === 2 && (!src.departDate || !src.returnDate || src.returnDate < src.departDate)) return '請設定出發與回程日期';
+  return '';
+}
+
+function rangeCalendarHtml(view, start, end) {
+  const y = view.y;
+  const m = view.m;
+  const firstDow = new Date(Date.UTC(y, m - 1, 1)).getUTCDay();
+  const count = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const today = isoDate(new Date().getFullYear(), new Date().getMonth() + 1, new Date().getDate());
+  const cells = [];
+  for (let i = 0; i < firstDow; i += 1) cells.push('<span class="cal-empty"></span>');
+  for (let d = 1; d <= count; d += 1) {
+    const iso = isoDate(y, m, d);
+    const classes = ['cal-day'];
+    if (start && end && iso > start && iso < end) classes.push('in');
+    if (iso === start) classes.push('start');
+    if (iso === end) classes.push('end');
+    if (iso === today) classes.push('today');
+    const pressed = iso === start || iso === end ? 'true' : 'false';
+    cells.push(`<button type="button" class="${classes.join(' ')}" data-date="${iso}" aria-pressed="${pressed}" aria-label="${iso}">${d}</button>`);
+  }
+  let summary = '<span>先點出發日，再點回程日</span>';
+  if (start && !end) summary = `<strong>出發 ${formatGuideDay(start)}</strong><span>再點回程日</span>`;
+  if (start && end) summary = `<strong>${formatGuideDay(start)} → ${formatGuideDay(end)}</strong><span>${tripSpanLabel(start, end)}</span>`;
+  return `
+    <div class="range-cal" id="g-range" data-depart="${escapeHtml(start || '')}" data-return="${escapeHtml(end || '')}">
+      <div class="range-summary" aria-live="polite">${summary}</div>
+      <div class="cal-nav">
+        <button type="button" class="secondary slim" data-cal="-1" aria-label="上個月">‹</button>
+        <strong>${y} 年 ${m} 月</strong>
+        <button type="button" class="secondary slim" data-cal="1" aria-label="下個月">›</button>
+      </div>
+      <div class="cal-week">${CAL_WEEKDAYS.map((name) => `<span>${name}</span>`).join('')}</div>
+      <div class="cal-grid">${cells.join('')}</div>
+    </div>`;
+}
 
 function currentGuide() {
   const src = state.trip?.guide || {};
@@ -3673,8 +3755,7 @@ async function saveGuide(guide, extra = {}) {
   await saveTrip({ guide, ...extra });
 }
 
-async function applyGuideDestination(name) {
-  const guide = currentGuide();
+async function applyGuideDestination(name, guide = currentGuide()) {
   const typed = String(name || '').trim().slice(0, 40);
   const preset = matchPreset(typed);
   const countries = (state.trip.countries || []).slice();
@@ -3788,14 +3869,36 @@ async function askGuide(step, note) {
 function openGuide(startStep) {
   const steps = GUIDE_STEPS;
   let step = Math.max(0, Math.min(steps.length - 1, startStep || 0));
+  let draft = currentGuide();
+  const openedOn = parseIsoDate(draft.departDate) || parseIsoDate(draft.returnDate);
+  const now = new Date();
+  let calView = openedOn ? { y: openedOn.y, m: openedOn.m } : { y: now.getFullYear(), m: now.getMonth() + 1 };
   const wrap = document.createElement('div');
   wrap.className = 'modal-backdrop';
   document.body.appendChild(wrap);
   const onSpots = () => { if (wrap.isConnected && step >= 4) paint(); };
   document.addEventListener('spots-changed', onSpots);
   const close = () => { document.removeEventListener('spots-changed', onSpots); wrap.remove(); };
+  function rememberSavedGuide() {
+    const saved = currentGuide();
+    draft = { ...draft, ...saved, step };
+  }
+  function chooseRange(iso) {
+    if (!draft.departDate || draft.returnDate) {
+      draft.departDate = iso;
+      draft.returnDate = '';
+    } else if (iso < draft.departDate) {
+      draft.returnDate = draft.departDate;
+      draft.departDate = iso;
+    } else {
+      draft.returnDate = iso;
+    }
+    const picked = parseIsoDate(iso);
+    if (picked) calView = { y: picked.y, m: picked.m };
+    paint();
+  }
   const paint = () => {
-    const guide = currentGuide();
+    const guide = draft;
     wrap.innerHTML = `
       <div class="modal">
         <div class="muted">第 ${step + 1} / ${steps.length} 步</div>
@@ -3814,7 +3917,7 @@ function openGuide(startStep) {
     } else if (step === 1) {
       pane.innerHTML = `<h3>怎麼去？</h3><div class="mode-grid">${GUIDE_MODES.map((mode) => `<button type="button" class="${guide.transportMode === mode ? 'on' : ''}" data-mode="${mode}">${mode}</button>`).join('')}</div><button type="button" class="secondary" id="g-ai">交通小提醒</button>`;
     } else if (step === 2) {
-      pane.innerHTML = `<h3>出發與回來</h3><label>出發日</label><input id="g-depart-date" type="date" value="${escapeHtml(guide.departDate)}" /><label>出發時間</label><input id="g-depart-time" type="time" value="${escapeHtml(guide.departTime)}" /><label>回程日</label><input id="g-return-date" type="date" value="${escapeHtml(guide.returnDate)}" /><label>回程時間</label><input id="g-return-time" type="time" value="${escapeHtml(guide.returnTime)}" /><button type="button" class="secondary" id="g-ai">這樣排會不會太趕</button>`;
+      pane.innerHTML = `<h3>出發與回來</h3>${rangeCalendarHtml(calView, guide.departDate, guide.returnDate)}<button type="button" class="secondary" id="g-ai">這樣排會不會太趕</button>`;
     } else if (step === 3) {
       pane.innerHTML = `<h3>住宿訂了嗎？</h3><div class="mode-grid"><button type="button" data-stay="yes" class="${guide.lodgingChoice === 'yes' ? 'on' : ''}">訂好了</button><button type="button" data-stay="no" class="${guide.lodgingChoice === 'no' ? 'on' : ''}">還沒</button><button type="button" data-stay="later" class="${guide.lodgingChoice === 'later' ? 'on' : ''}">晚點再說</button></div><label>貼上訂房文字</label><textarea id="g-hotel" rows="3" placeholder="飯店名、入住與退房日期"></textarea><button type="button" class="secondary" id="g-hotel-read">讀這段訂房</button><button type="button" class="ghost" id="g-hotel-manual">自己填一間</button><button type="button" class="secondary" id="g-ai">住宿小建議</button>`;
     } else if (step === 4) {
@@ -3823,21 +3926,38 @@ function openGuide(startStep) {
       pane.innerHTML = `<h3>排進每一天</h3><div class="muted">左右滑看每一天。把景點拖進去，或拖回景點池。</div><button type="button" class="secondary" id="g-ai">幫我排進日期</button>${arrangeDaysHtml()}${spotDockHtml({ guide: false })}`;
     }
     $$('[data-step]', wrap).forEach((btn) => btn.addEventListener('click', async () => {
-      try { await collect(false); step = Number(btn.dataset.step); paint(); } catch (err) { toast(err.message || '先完成這一步'); }
+      try {
+        await collect(false);
+        step = Number(btn.dataset.step);
+        await saveGuide({ ...draft, step });
+        rememberSavedGuide();
+        paint();
+      } catch (err) { toast(err.message || '先完成這一步'); }
     }));
     $$('[data-mode]', wrap).forEach((btn) => btn.addEventListener('click', async () => {
-      await saveGuide({ ...currentGuide(), transportMode: btn.dataset.mode, step });
+      draft.transportMode = btn.dataset.mode;
+      await saveGuide({ ...draft, step });
+      rememberSavedGuide();
       paint();
     }));
     $$('[data-stay]', wrap).forEach((btn) => btn.addEventListener('click', async () => {
-      await saveGuide({ ...currentGuide(), lodgingChoice: btn.dataset.stay, step });
+      draft.lodgingChoice = btn.dataset.stay;
+      await saveGuide({ ...draft, step });
+      rememberSavedGuide();
       paint();
     }));
+    $$('[data-cal]', wrap).forEach((btn) => btn.addEventListener('click', () => {
+      calView = shiftIsoMonth(calView.y, calView.m, Number(btn.dataset.cal));
+      paint();
+    }));
+    $$('[data-date]', wrap).forEach((btn) => btn.addEventListener('click', () => chooseRange(btn.dataset.date)));
+    $('#g-dest', wrap)?.addEventListener('input', (event) => { draft.destination = event.target.value; });
     $('#wizard-prev', wrap)?.addEventListener('click', async () => {
       try {
         await collect(false);
         step -= 1;
-        await saveGuide({ ...currentGuide(), step });
+        await saveGuide({ ...draft, step });
+        rememberSavedGuide();
         paint();
       } catch (err) { toast(err.message || '先完成這一步'); }
     });
@@ -3846,7 +3966,8 @@ function openGuide(startStep) {
         await collect(true);
         if (step === steps.length - 1) { close(); toast('先排到這裡，隨時可以再改'); return; }
         step += 1;
-        await saveGuide({ ...currentGuide(), step });
+        await saveGuide({ ...draft, step });
+        rememberSavedGuide();
         paint();
       } catch (err) { toast(err.message || '這一步還沒好'); }
     });
@@ -3861,36 +3982,28 @@ function openGuide(startStep) {
     bindSpotDrag(wrap);
   };
   async function collect(strict) {
-    const guide = { ...currentGuide(), step };
+    const field = $('#g-dest', wrap);
+    if (field) draft.destination = field.value;
+    const guide = { ...draft, step };
+    const error = guideStepError(step, guide);
+    if (strict && error) throw new Error(error);
     if (step === 0) {
-      const name = $('#g-dest', wrap)?.value.trim() || guide.destination;
-      if (strict && !name) throw new Error('請填目的地');
-      if (name) await applyGuideDestination(name);
+      if (guide.destination.trim()) await applyGuideDestination(guide.destination, guide);
       else await saveGuide(guide);
-    } else if (step === 1) {
-      const next = { ...currentGuide(), step };
-      if (strict && !next.transportMode) throw new Error('請選一種交通');
-      if (next.departDate && next.returnDate && next.returnDate >= next.departDate) await applyGuideTravel(next);
-      else await saveGuide(next);
-    } else if (step === 2) {
-      guide.departDate = $('#g-depart-date', wrap)?.value || '';
-      guide.departTime = $('#g-depart-time', wrap)?.value || '';
-      guide.returnDate = $('#g-return-date', wrap)?.value || '';
-      guide.returnTime = $('#g-return-time', wrap)?.value || '';
-      if (guide.departDate && guide.returnDate && guide.returnDate >= guide.departDate) await applyGuideTravel(guide);
-      else if (strict) throw new Error('請設定出發與回程日期');
-      else await saveGuide(guide);
-    } else if (step === 3) {
-      await saveGuide(guide);
+    } else if (step === 1 && !guideStepError(2, guide)) {
+      await applyGuideTravel(guide);
+    } else if (step === 2 && !error) {
+      await applyGuideTravel(guide);
     } else {
       await saveGuide(guide);
     }
+    rememberSavedGuide();
   }
   async function runGuideAi() {
     const box = $('#wizard-ai', wrap);
     box.innerHTML = '<div class="muted">正在想…</div>';
     try {
-      const note = $('#g-dest', wrap)?.value || $('#g-hotel', wrap)?.value || '';
+      const note = [draft.destination, draft.departDate && draft.returnDate ? `${draft.departDate} 到 ${draft.returnDate}，${tripSpanLabel(draft.departDate, draft.returnDate)}` : '', $('#g-hotel', wrap)?.value || ''].filter(Boolean).join(' ');
       const data = await askGuide(GUIDE_STEPS[step], note);
       if (data.enabled === false) {
         box.innerHTML = '<div class="muted">AI 還沒設定，我們先自己填就好。</div>';
@@ -3904,11 +4017,16 @@ function openGuide(startStep) {
   }
   async function applyIdea(idea) {
     if (step === 0) {
+      draft.destination = idea;
       const input = $('#g-dest', wrap);
       if (input) input.value = idea;
     } else if (step === 1) {
       const mode = GUIDE_MODES.find((item) => idea.includes(item));
-      if (mode) await saveGuide({ ...currentGuide(), transportMode: mode, step });
+      if (mode) {
+        draft.transportMode = mode;
+        await saveGuide({ ...draft, step });
+        rememberSavedGuide();
+      }
     } else if (step === 4) {
       const name = idea.split('|')[0].trim();
       if (name) await addSpotFromSearch(name);
