@@ -253,6 +253,89 @@ function withGeoSlot(fn) {
   return run;
 }
 
+const LODGING_TYPES = new Set(['hotel', 'guest_house', 'hostel', 'motel', 'apartment', 'apartments', 'chalet']);
+
+function isLodgingHit(place) {
+  const type = String(place?.type || '').toLowerCase();
+  const category = String(place?.category || place?.class || '').toLowerCase();
+  if (!LODGING_TYPES.has(type)) return false;
+  if (category && category !== 'tourism' && category !== 'building') return false;
+  return true;
+}
+
+function lodgingAddress(place) {
+  const address = place?.address || {};
+  const parts = [address.road, address.suburb || address.neighbourhood, address.city || address.town || address.village, address.state].filter(Boolean);
+  const line = parts.join('、');
+  return String(line || place?.display_name || '').slice(0, 200);
+}
+
+function toLodgingHit(place) {
+  if (!isLodgingHit(place)) return null;
+  const lat = Number(place?.lat);
+  const lng = Number(place?.lon ?? place?.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  const name = String(place?.namedetails?.name || place?.name || String(place?.display_name || '').split(',')[0] || '').trim().slice(0, 80);
+  if (!name) return null;
+  return { name, address: lodgingAddress(place), lat, lng, kind: String(place.type || '') };
+}
+
+async function nominatimSearch(params) {
+  const base = String(process.env.GEOCODE_API_URL || 'https://nominatim.openstreetmap.org/search').trim();
+  const query = new URLSearchParams({ format: 'jsonv2', addressdetails: '1', namedetails: '1', limit: '8', ...params });
+  const url = `${base}${base.includes('?') ? '&' : '?'}${query.toString()}`;
+  return withGeoSlot(async () => {
+    const upstream = await fetch(url, {
+      headers: {
+        'User-Agent': 'LeoPrototype/1.0 (https://travel-proto.onrender.com)',
+        Accept: 'application/json',
+      },
+      signal: AbortSignal.timeout(12000),
+    });
+    const data = await upstream.json().catch(() => []);
+    if (!upstream.ok || !Array.isArray(data)) return [];
+    return data;
+  });
+}
+
+function viewboxAround(lat, lng, span) {
+  return `${lng - span},${lat + span},${lng + span},${lat - span}`;
+}
+
+app.get('/api/lodging-search', async (req, res) => {
+  const query = String(req.query.q || '').trim().replace(/\s+/g, ' ').slice(0, 80);
+  if (query.length < 2) return res.json({ results: [] });
+  try {
+    const direct = await nominatimSearch({ q: query, limit: '8' });
+    let results = direct.map(toLodgingHit).filter(Boolean);
+    const center = direct.find((place) => Number.isFinite(Number(place?.lat)) && Number.isFinite(Number(place?.lon ?? place?.lng)));
+    if (results.length < 3 && center) {
+      const lat = Number(center.lat);
+      const lng = Number(center.lon ?? center.lng);
+      const broad = ['boundary', 'place'].includes(String(center.category || center.class || '')) || ['city', 'town', 'village', 'administrative', 'state', 'country'].includes(String(center.type || ''));
+      const nearby = await nominatimSearch({
+        q: 'hotel',
+        bounded: '1',
+        viewbox: viewboxAround(lat, lng, broad ? 0.22 : 0.12),
+        limit: '8',
+      });
+      const seen = new Set(results.map((item) => `${item.lat.toFixed(4)},${item.lng.toFixed(4)}`));
+      for (const item of nearby.map(toLodgingHit).filter(Boolean)) {
+        const key = `${item.lat.toFixed(4)},${item.lng.toFixed(4)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        results.push(item);
+      }
+    }
+    const compact = query.replace(/\s/g, '');
+    results.sort((a, b) => Number(b.name.replace(/\s/g, '').includes(compact)) - Number(a.name.replace(/\s/g, '').includes(compact)));
+    res.json({ results: results.slice(0, 6) });
+  } catch (err) {
+    console.error('lodging search failed', err?.name || 'error');
+    res.status(502).json({ error: '暫時找不到住宿' });
+  }
+});
+
 async function lookupGeo(query) {
   const key = query.toLowerCase();
   const cache = readGeoCache();

@@ -312,7 +312,7 @@ button.branch-option strong { display: block; font-weight: 700; }
 .modal {
   width: min(430px, 100%); background: var(--card); border-radius: 20px 20px 0 0;
   padding: 1rem 1rem calc(1rem + env(safe-area-inset-bottom));
-  max-height: 88dvh; overflow: auto;
+  max-height: 88dvh; overflow: auto; overscroll-behavior: contain;
 }
 .modal h3 { margin: 0 0 0.5rem; }
 .actions { display: flex; gap: 0.5rem; margin-top: 0.9rem; }
@@ -434,7 +434,34 @@ label.file-btn {
   padding: 0.25rem 0.7rem 0.25rem 0.25rem; min-height: 44px; touch-action: none;
   box-shadow: 0 4px 0 rgba(120, 86, 54, 0.08); font-weight: 700;
 }
-.spot-chip span { color: var(--ink); white-space: nowrap; }
+.spot-chip span { color: var(--ink); }
+.spot-chip .spot-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 11rem; }
+.spot-chip.selected { box-shadow: 0 0 0 3px var(--accent); }
+.spot-x, .spot-back {
+  flex: none; min-width: 44px; min-height: 40px; padding: 0 0.45rem;
+  background: #fff; color: var(--ink); border: 1px solid var(--line); border-radius: 999px;
+}
+.spot-confirm {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; width: 100%;
+  background: #fff6d8; border-radius: 18px; padding: 0.45rem 0.55rem;
+}
+.spot-confirm button { min-height: 44px; }
+.spot-placer { margin: 0.35rem 0; }
+.placer-days { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.3rem; }
+.placer-days button {
+  min-height: 44px; background: #fff; color: var(--ink); border: 1px solid var(--line); border-radius: 999px;
+}
+.suggest-list {
+  border: 1px solid var(--line); border-radius: 16px; overflow: hidden; background: #fff; margin-top: 0.35rem;
+}
+.suggest-item {
+  display: flex; flex-direction: column; align-items: flex-start; width: 100%;
+  min-height: 48px; padding: 0.45rem 0.7rem; background: #fff; color: var(--ink);
+  border: 0; border-bottom: 1px solid var(--line); border-radius: 0; text-align: left; font-weight: 700;
+}
+.suggest-item span { color: var(--muted); font-weight: 500; font-size: 0.8rem; white-space: normal; }
+.toast-undo { display: flex; gap: 0.55rem; align-items: center; }
+.toast-undo button { background: #fff; color: var(--ink); min-height: 36px; padding: 0.3rem 0.7rem; }
 .spot-chip img, .spot-fallback {
   width: 36px; height: 36px; border-radius: 999px; object-fit: cover; flex: none;
 }

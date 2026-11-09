@@ -2123,7 +2123,8 @@ function listTripDrafts() {
 
 function draftFieldNodes(root) {
   return [...root.querySelectorAll('input, textarea, select')].filter((el) => {
-    if (el.type === 'password' || el.type === 'file' || el.type === 'hidden') return false;
+    if (el.type === 'password' || el.type === 'file') return false;
+    if (el.type === 'hidden' && !/^stay-(lat|lng)$/.test(el.id)) return false;
     if (el.id && /key|token|secret|password|openai/i.test(el.id)) return false;
     return Boolean(el.id) || el.classList.contains('e-split');
   });
@@ -2626,6 +2627,8 @@ function readStayFields(wrap) {
     mapsUrl: $('#stay-maps', wrap).value.trim().slice(0, 500),
     note: $('#stay-note', wrap).value.trim().slice(0, 200),
     countryName: ($('#stay-country', wrap)?.value || '').slice(0, 40),
+    lat: finiteCoord($('#stay-lat', wrap)?.value),
+    lng: finiteCoord($('#stay-lng', wrap)?.value),
   };
 }
 
@@ -2638,7 +2641,10 @@ function stayFormHtml(value = {}) {
     <label>退房</label>
     <input type="date" id="stay-out" value="${escapeHtml(calendarDate(value.checkOut) || '')}" />
     <label>地點（用來搜尋）</label>
-    <input id="stay-place" maxlength="200" placeholder="城市或區域，例如：東京淺草" value="${escapeHtml(value.place || '')}" />
+    <input id="stay-place" maxlength="200" placeholder="城市或飯店，例如：日本岡山" value="${escapeHtml(value.place || '')}" autocomplete="off" enterkeyhint="search" />
+    <div id="stay-suggest" class="suggest-list" hidden></div>
+    <input type="hidden" id="stay-lat" value="${escapeHtml(value.lat ?? '')}" />
+    <input type="hidden" id="stay-lng" value="${escapeHtml(value.lng ?? '')}" />
     <label>地址</label>
     <input id="stay-address" maxlength="200" placeholder="可留空，選定分店後會自動帶入" value="${escapeHtml(value.address || '')}" />
     <label>電話</label>
@@ -2651,9 +2657,75 @@ function stayFormHtml(value = {}) {
   `;
 }
 
+function bindStaySearch(wrap) {
+  const input = $('#stay-place', wrap);
+  const list = $('#stay-suggest', wrap);
+  if (!input || !list) return;
+  let composing = false;
+  let timer = null;
+  let ticket = 0;
+  const run = async () => {
+    const query = input.value.trim();
+    if (query.length < 2) {
+      list.hidden = true;
+      list.innerHTML = '';
+      return;
+    }
+    const mine = ++ticket;
+    list.hidden = false;
+    list.innerHTML = '<div class="muted">搜尋住宿中…</div>';
+    try {
+      const data = await api(`/api/lodging-search?q=${encodeURIComponent(query)}`);
+      if (mine !== ticket) return;
+      const results = Array.isArray(data.results) ? data.results : [];
+      if (!results.length) {
+        list.innerHTML = '<div class="muted">沒有找到住宿</div>';
+        return;
+      }
+      list.innerHTML = results.map((item, index) => `<button type="button" class="suggest-item" data-stay-pick="${index}"><strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(item.address || item.kind || '')}</span></button>`).join('');
+      $$('[data-stay-pick]', list).forEach((btn) => btn.addEventListener('click', () => {
+        const item = results[Number(btn.dataset.stayPick)];
+        if (!item) return;
+        const name = $('#stay-name', wrap);
+        if (name) name.value = item.name || '';
+        const address = $('#stay-address', wrap);
+        if (address) address.value = item.address || '';
+        const lat = $('#stay-lat', wrap);
+        const lng = $('#stay-lng', wrap);
+        if (lat) lat.value = item.lat ?? '';
+        if (lng) lng.value = item.lng ?? '';
+        list.hidden = true;
+      }));
+    } catch (err) {
+      if (mine !== ticket) return;
+      list.innerHTML = `<div class="muted">${escapeHtml(err.message || '暫時找不到住宿')}</div>`;
+    }
+  };
+  const schedule = () => {
+    clearTimeout(timer);
+    timer = setTimeout(run, 350);
+  };
+  input.addEventListener('compositionstart', () => {
+    composing = true;
+    clearTimeout(timer);
+  });
+  input.addEventListener('compositionend', () => {
+    composing = false;
+    schedule();
+  });
+  input.addEventListener('input', (event) => {
+    const lat = $('#stay-lat', wrap);
+    const lng = $('#stay-lng', wrap);
+    if (lat) lat.value = '';
+    if (lng) lng.value = '';
+    if (event.isComposing || composing) return;
+    schedule();
+  });
+}
+
 function openStayModal({ item, defaults } = {}) {
   const value = item || defaults || {};
-  openModal(item ? '編輯住宿' : '新增住宿', stayFormHtml(value), async (wrap) => {
+  const wrap = openModal(item ? '編輯住宿' : '新增住宿', stayFormHtml(value), async (wrap) => {
     const fields = readStayFields(wrap);
     if (!fields) throw new Error('請填住宿名稱');
     let lodgings;
@@ -2666,6 +2738,7 @@ function openStayModal({ item, defaults } = {}) {
     }
     await saveTrip({ lodgings });
   }, { draft: { type: 'stay', id: item?.id || 'new', day: calendarDate(value.checkIn) || '' } });
+  bindStaySearch(wrap);
 }
 
 function openLodgingSetup(country) {
@@ -2694,6 +2767,10 @@ function openLodgingSetup(country) {
       $('#stay-name', wrap).value = '';
       $('#stay-place', wrap).value = '';
       $('#stay-address', wrap).value = '';
+      $('#stay-lat', wrap).value = '';
+      $('#stay-lng', wrap).value = '';
+      const suggest = $('#stay-suggest', wrap);
+      if (suggest) { suggest.hidden = true; suggest.innerHTML = ''; }
       $('#stay-phone', wrap).value = '';
       $('#stay-maps', wrap).value = '';
       $('#stay-note', wrap).value = '';
@@ -2702,6 +2779,7 @@ function openLodgingSetup(country) {
       toast(err.message || '失敗');
     }
   });
+  bindStaySearch(wrap);
 }
 
 function openActivityModal(date, activity) {
@@ -3710,8 +3788,43 @@ function spotsFor(day) {
   return (state.trip?.spots || []).filter((spot) => (day ? spot.day === day : !spot.day)).sort((a, b) => a.order - b.order);
 }
 
+let spotUi = { selectedId: '', confirmId: '' };
+
+function refreshSpotUi() {
+  document.dispatchEvent(new CustomEvent('spots-ui'));
+  if (state.trip && document.querySelector('#tab-timeline')) render();
+}
+
+function toastUndo(message, onUndo) {
+  const t = document.createElement('div');
+  t.className = 'toast toast-undo';
+  t.innerHTML = `<span>${escapeHtml(message)}</span><button type="button">復原</button>`;
+  t.querySelector('button').addEventListener('click', () => {
+    t.remove();
+    Promise.resolve(onUndo()).catch((err) => toast(err.message || '沒有復原'));
+  });
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 5000);
+}
+
 function spotChip(spot) {
-  return `<button type="button" class="spot-chip" data-spot="${escapeHtml(spot.id)}">${spotThumb(spot)}<span>${escapeHtml(spot.name)}</span></button>`;
+  const id = escapeHtml(spot.id);
+  if (spotUi.confirmId === spot.id) {
+    return `<div class="spot-confirm" data-spot="${id}"><span>刪掉「${escapeHtml(spot.name)}」？</span><button type="button" data-confirm-delete="${id}">刪除</button><button type="button" class="secondary" data-confirm-cancel>取消</button></div>`;
+  }
+  const selected = spotUi.selectedId === spot.id ? ' selected' : '';
+  const back = spot.day ? `<button type="button" class="spot-back" data-spot-pool="${id}" aria-label="放回景點池">放回</button>` : '';
+  return `<div class="spot-chip${selected}" data-spot="${id}" role="group">${spotThumb(spot)}<span class="spot-name">${escapeHtml(spot.name)}</span>${back}<button type="button" class="spot-x" data-spot-remove="${id}" aria-label="刪除${escapeHtml(spot.name)}">×</button></div>`;
+}
+
+function spotPlacerHtml() {
+  const spot = (state.trip?.spots || []).find((item) => item.id === spotUi.selectedId);
+  if (!spot) return '';
+  const days = buildTimelineDays().map(([date]) => date);
+  const dayButtons = days.length
+    ? days.map((date) => `<button type="button" data-place-day="${date}">${date.slice(5)}</button>`).join('')
+    : '<span class="muted">先設定出發與回程</span>';
+  return `<div class="spot-placer"><div>「${escapeHtml(spot.name)}」要放哪一天？點日期，或點上面的某一天。</div><div class="placer-days">${dayButtons}<button type="button" data-place-pool>放回景點池</button></div></div>`;
 }
 
 function spotDayHtml(date) {
@@ -3743,6 +3856,7 @@ function spotDockHtml(options = {}) {
   return `
     <div class="spot-dock">
       <div class="row"><strong>景點池</strong>${guideBtn}</div>
+      ${spotPlacerHtml()}
       <div class="spot-pool" data-drop-pool>${pool.map(spotChip).join('') || '<div class="muted">搜尋景點後會出現在這裡</div>'}</div>
     </div>`;
 }
@@ -3878,7 +3992,12 @@ function openGuide(startStep) {
   document.body.appendChild(wrap);
   const onSpots = () => { if (wrap.isConnected && step >= 4) paint(); };
   document.addEventListener('spots-changed', onSpots);
-  const close = () => { document.removeEventListener('spots-changed', onSpots); wrap.remove(); };
+  document.addEventListener('spots-ui', onSpots);
+  const close = () => {
+    document.removeEventListener('spots-changed', onSpots);
+    document.removeEventListener('spots-ui', onSpots);
+    wrap.remove();
+  };
   function rememberSavedGuide() {
     const saved = currentGuide();
     draft = { ...draft, ...saved, step };
@@ -3921,7 +4040,7 @@ function openGuide(startStep) {
     } else if (step === 3) {
       pane.innerHTML = `<h3>住宿訂了嗎？</h3><div class="mode-grid"><button type="button" data-stay="yes" class="${guide.lodgingChoice === 'yes' ? 'on' : ''}">訂好了</button><button type="button" data-stay="no" class="${guide.lodgingChoice === 'no' ? 'on' : ''}">還沒</button><button type="button" data-stay="later" class="${guide.lodgingChoice === 'later' ? 'on' : ''}">晚點再說</button></div><label>貼上訂房文字</label><textarea id="g-hotel" rows="3" placeholder="飯店名、入住與退房日期"></textarea><button type="button" class="secondary" id="g-hotel-read">讀這段訂房</button><button type="button" class="ghost" id="g-hotel-manual">自己填一間</button><button type="button" class="secondary" id="g-ai">住宿小建議</button>`;
     } else if (step === 4) {
-      pane.innerHTML = `<h3>想去的地方</h3><label>搜尋景點</label><input id="g-spot" maxlength="80" placeholder="例如：清水寺" /><button type="button" id="g-spot-add">加入景點池</button><button type="button" class="secondary" id="g-ai">推薦幾個景點</button><div class="spot-pool">${spotsFor('').map(spotChip).join('') || '<div class="muted">還沒有景點</div>'}</div>`;
+      pane.innerHTML = `<h3>想去的地方</h3><label>搜尋景點</label><input id="g-spot" maxlength="80" placeholder="例如：清水寺" /><button type="button" id="g-spot-add">加入景點池</button><button type="button" class="secondary" id="g-ai">推薦幾個景點</button>${spotPlacerHtml()}<div class="spot-pool" data-drop-pool>${spotsFor('').map(spotChip).join('') || '<div class="muted">還沒有景點</div>'}</div>`;
     } else {
       pane.innerHTML = `<h3>排進每一天</h3><div class="muted">左右滑看每一天。把景點拖進去，或拖回景點池。</div><button type="button" class="secondary" id="g-ai">幫我排進日期</button>${arrangeDaysHtml()}${spotDockHtml({ guide: false })}`;
     }
@@ -4082,62 +4201,157 @@ async function readHotelPaste(text) {
   }
 }
 
+function moveSpotTo(id, day, beforeId = '') {
+  spotUi.selectedId = '';
+  spotUi.confirmId = '';
+  return updateSpots((spots) => {
+    const spot = spots.find((item) => item.id === id);
+    if (!spot) return spots;
+    spot.day = day || '';
+    const same = spots.filter((item) => item.day === spot.day && item.id !== spot.id);
+    const rest = spots.filter((item) => item.day !== spot.day);
+    let index = same.length;
+    if (beforeId && beforeId !== id) index = same.findIndex((item) => item.id === beforeId);
+    if (index < 0) index = same.length;
+    same.splice(index, 0, spot);
+    return rest.concat(same);
+  });
+}
+
+function removeSpot(id) {
+  const spot = (state.trip?.spots || []).find((item) => item.id === id);
+  if (!spot) return Promise.resolve();
+  const snapshot = { ...spot };
+  spotUi.confirmId = '';
+  if (spotUi.selectedId === id) spotUi.selectedId = '';
+  return updateSpots((spots) => spots.filter((item) => item.id !== id)).then(() => {
+    toastUndo(`已刪除「${snapshot.name}」`, () => updateSpots((spots) => [snapshot, ...spots.filter((item) => item.id !== snapshot.id)]));
+  });
+}
+
 function bindSpotDrag(root) {
   let drag = null;
   const ghost = () => document.getElementById('spot-ghost');
-  $$('[data-spot]', root).forEach((chip) => {
+  const clearGhost = () => ghost()?.remove();
+  const showGhost = (chip, x, y) => {
+    let node = ghost();
+    if (!node) {
+      node = chip.cloneNode(true);
+      node.id = 'spot-ghost';
+      node.classList.add('spot-ghost');
+      node.querySelectorAll('button').forEach((button) => button.remove());
+      document.body.appendChild(node);
+    }
+    node.style.left = `${x + 8}px`;
+    node.style.top = `${y + 8}px`;
+  };
+  const dropAt = async (id, chip, x, y) => {
+    clearGhost();
+    if (chip) chip.style.visibility = 'hidden';
+    const target = document.elementFromPoint(x, y);
+    if (chip) chip.style.visibility = '';
+    const dayEl = target?.closest('[data-drop-day]');
+    const pool = target?.closest('[data-drop-pool]');
+    const beforeId = target?.closest('[data-spot]')?.dataset.spot || '';
+    const dropDay = dayEl?.dataset.dropDay || '';
+    if (!pool && !dropDay) return;
+    try {
+      await moveSpotTo(id, pool ? '' : dropDay, beforeId);
+    } catch (err) {
+      toast(err.message || '沒有移成');
+    }
+  };
+  const selectSpot = (id) => {
+    spotUi.selectedId = spotUi.selectedId === id ? '' : id;
+    spotUi.confirmId = '';
+    refreshSpotUi();
+  };
+  $$('[data-spot-remove]', root).forEach((btn) => btn.addEventListener('click', (event) => {
+    event.stopPropagation();
+    spotUi.confirmId = btn.dataset.spotRemove;
+    spotUi.selectedId = '';
+    refreshSpotUi();
+  }));
+  $$('[data-confirm-cancel]', root).forEach((btn) => btn.addEventListener('click', (event) => {
+    event.stopPropagation();
+    spotUi.confirmId = '';
+    refreshSpotUi();
+  }));
+  $$('[data-confirm-delete]', root).forEach((btn) => btn.addEventListener('click', async (event) => {
+    event.stopPropagation();
+    try { await removeSpot(btn.dataset.confirmDelete); }
+    catch (err) { toast(err.message || '沒有刪掉'); }
+  }));
+  $$('[data-spot-pool]', root).forEach((btn) => btn.addEventListener('click', async (event) => {
+    event.stopPropagation();
+    try { await moveSpotTo(btn.dataset.spotPool, ''); }
+    catch (err) { toast(err.message || '沒有放回'); }
+  }));
+  $$('[data-place-day]', root).forEach((btn) => btn.addEventListener('click', async () => {
+    if (!spotUi.selectedId) return;
+    try { await moveSpotTo(spotUi.selectedId, btn.dataset.placeDay); }
+    catch (err) { toast(err.message || '沒有放上'); }
+  }));
+  $$('[data-place-pool]', root).forEach((btn) => btn.addEventListener('click', async () => {
+    if (!spotUi.selectedId) return;
+    try { await moveSpotTo(spotUi.selectedId, ''); }
+    catch (err) { toast(err.message || '沒有放回'); }
+  }));
+  $$('[data-drop-day]', root).forEach((zone) => zone.addEventListener('click', async () => {
+    if (!spotUi.selectedId || drag) return;
+    try { await moveSpotTo(spotUi.selectedId, zone.dataset.dropDay); }
+    catch (err) { toast(err.message || '沒有放上'); }
+  }));
+  $$('[data-spot].spot-chip', root).forEach((chip) => {
+    const arm = (x, y) => ({ id: chip.dataset.spot, x, y, moved: false });
     chip.addEventListener('pointerdown', (event) => {
+      if (event.pointerType === 'touch') return;
       if (event.button != null && event.button !== 0) return;
-      drag = { id: chip.dataset.spot, x: event.clientX, y: event.clientY, moved: false };
-      try { chip.setPointerCapture(event.pointerId); } catch (_) { /* pointer already gone */ }
-    });
-    chip.addEventListener('pointercancel', () => {
-      ghost()?.remove();
-      drag = null;
+      if (event.target.closest('button')) return;
+      drag = arm(event.clientX, event.clientY);
     });
     chip.addEventListener('pointermove', (event) => {
-      if (!drag || drag.id !== chip.dataset.spot) return;
+      if (!drag || drag.id !== chip.dataset.spot || event.pointerType === 'touch') return;
       if (Math.hypot(event.clientX - drag.x, event.clientY - drag.y) > 8) drag.moved = true;
-      if (!drag.moved) return;
-      let node = ghost();
-      if (!node) {
-        node = chip.cloneNode(true);
-        node.id = 'spot-ghost';
-        node.classList.add('spot-ghost');
-        document.body.appendChild(node);
-      }
-      node.style.left = `${event.clientX + 8}px`;
-      node.style.top = `${event.clientY + 8}px`;
+      if (drag.moved) showGhost(chip, event.clientX, event.clientY);
     });
     chip.addEventListener('pointerup', async (event) => {
-      if (!drag || drag.id !== chip.dataset.spot) return;
-      ghost()?.remove();
+      if (!drag || drag.id !== chip.dataset.spot || event.pointerType === 'touch') return;
       const moved = drag.moved;
       const id = drag.id;
       drag = null;
-      if (!moved) return;
-      chip.style.visibility = 'hidden';
-      const target = document.elementFromPoint(event.clientX, event.clientY);
-      chip.style.visibility = '';
-      const dayEl = target?.closest('[data-drop-day]');
-      const pool = target?.closest('[data-drop-pool]');
-      const beforeId = target?.closest('[data-spot]')?.dataset.spot || '';
-      const dropDay = dayEl?.dataset.dropDay || '';
-      if (!pool && !dropDay) return;
-      try {
-        await updateSpots((spots) => {
-          const spot = spots.find((item) => item.id === id);
-          if (!spot) return spots;
-          spot.day = pool ? '' : dropDay;
-          const same = spots.filter((item) => item.day === spot.day && item.id !== spot.id);
-          const rest = spots.filter((item) => item.day !== spot.day);
-          let index = same.length;
-          if (beforeId && beforeId !== id) index = same.findIndex((item) => item.id === beforeId);
-          if (index < 0) index = same.length;
-          same.splice(index, 0, spot);
-          return rest.concat(same);
-        });
-      } catch (err) { toast(err.message || '沒有移成'); }
+      clearGhost();
+      if (!moved) { selectSpot(id); return; }
+      await dropAt(id, chip, event.clientX, event.clientY);
+    });
+    chip.addEventListener('touchstart', (event) => {
+      if (event.target.closest('button')) return;
+      const touch = event.changedTouches[0];
+      if (!touch) return;
+      drag = { ...arm(touch.clientX, touch.clientY), touch: true };
+    }, { passive: true });
+    chip.addEventListener('touchmove', (event) => {
+      if (!drag?.touch || drag.id !== chip.dataset.spot) return;
+      const touch = event.touches[0];
+      if (!touch) return;
+      event.preventDefault();
+      if (Math.hypot(touch.clientX - drag.x, touch.clientY - drag.y) > 8) drag.moved = true;
+      if (drag.moved) showGhost(chip, touch.clientX, touch.clientY);
+    }, { passive: false });
+    chip.addEventListener('touchend', async (event) => {
+      if (!drag?.touch || drag.id !== chip.dataset.spot) return;
+      const touch = event.changedTouches[0];
+      const moved = drag.moved;
+      const id = drag.id;
+      drag = null;
+      clearGhost();
+      if (!moved) { selectSpot(id); return; }
+      if (touch) await dropAt(id, chip, touch.clientX, touch.clientY);
+    });
+    chip.addEventListener('touchcancel', () => {
+      if (!drag?.touch) return;
+      clearGhost();
+      drag = null;
     });
   });
 }
