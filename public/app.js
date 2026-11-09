@@ -619,6 +619,8 @@ function normalizeTrip(trip) {
   trip.restaurants = Array.isArray(trip.restaurants) ? trip.restaurants : [];
   trip.lodgings = Array.isArray(trip.lodgings) ? trip.lodgings : [];
   trip.transports = Array.isArray(trip.transports) ? trip.transports : [];
+  trip.spots = Array.isArray(trip.spots) ? trip.spots : [];
+  trip.guide = trip.guide && typeof trip.guide === 'object' ? trip.guide : {};
   const rawFlights = trip.flights && typeof trip.flights === 'object' ? trip.flights : {};
   const leg = (value) => ({
     number: value?.number || '',
@@ -700,32 +702,36 @@ function persistSession() {
 
 let saveChain = Promise.resolve();
 
-function saveTrip(patch) {
-  const run = async () => {
-    if (!state.trip) return;
-    const body = {
-      memberId: state.memberId,
-      title: patch.title ?? state.trip.title,
-      countries: patch.countries ?? state.trip.countries,
-      days: patch.days ?? state.trip.days,
-      expenses: patch.expenses ?? state.trip.expenses,
-      restaurants: patch.restaurants ?? state.trip.restaurants ?? [],
-      lodgings: patch.lodgings ?? state.trip.lodgings ?? [],
-      transports: patch.transports ?? state.trip.transports ?? [],
-      flights: patch.flights ?? state.trip.flights ?? emptyFlights(),
-    };
-    let data;
-    try {
-      data = await api(`/api/trips/${state.trip.id}`, { method: 'PUT', body: JSON.stringify(body) });
-    } catch (err) {
-      if (navigator.onLine === false || err.message === 'Failed to fetch') {
-        throw new Error('離線時無法修改，以免蓋過旅伴的更新');
-      }
-      throw err;
-    }
-    adoptTrip(data.trip);
-    render();
+async function putTrip(patch) {
+  if (!state.trip) return;
+  const body = {
+    memberId: state.memberId,
+    title: patch.title ?? state.trip.title,
+    countries: patch.countries ?? state.trip.countries,
+    days: patch.days ?? state.trip.days,
+    expenses: patch.expenses ?? state.trip.expenses,
+    restaurants: patch.restaurants ?? state.trip.restaurants ?? [],
+    lodgings: patch.lodgings ?? state.trip.lodgings ?? [],
+    transports: patch.transports ?? state.trip.transports ?? [],
+    flights: patch.flights ?? state.trip.flights ?? emptyFlights(),
+    guide: patch.guide ?? state.trip.guide ?? {},
+    spots: patch.spots ?? state.trip.spots ?? [],
   };
+  let data;
+  try {
+    data = await api(`/api/trips/${state.trip.id}`, { method: 'PUT', body: JSON.stringify(body) });
+  } catch (err) {
+    if (navigator.onLine === false || err.message === 'Failed to fetch') {
+      throw new Error('離線時無法修改，以免蓋過旅伴的更新');
+    }
+    throw err;
+  }
+  adoptTrip(data.trip);
+  render();
+}
+
+function saveTrip(patch) {
+  const run = () => putTrip(patch);
   saveChain = saveChain.then(run, run);
   return saveChain;
 }
@@ -854,6 +860,7 @@ function buildTimelineDays() {
   for (const [day, list] of Object.entries(trip.days || {})) {
     for (const activity of list || []) ensure(settleOvernightDate(day, activity?.time, activity?.endTime, activity?.endDate));
   }
+  for (const spot of trip.spots || []) ensure(spot.day);
   ensure(trip.flights?.outbound?.date);
   ensure(trip.flights?.inbound?.date);
   return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]));
@@ -1092,10 +1099,13 @@ function renderTimeline() {
       </div>
     </div>
     <div class="card">
-      <div class="row">
-        <h2 style="margin:0;flex:1">行程時間軸</h2>
-        <button type="button" class="secondary slim" id="btn-trip-map">整趟地圖</button>
-        <button type="button" class="secondary slim" id="btn-export-pdf">匯出 PDF</button>
+      <div class="timeline-head">
+        <h2>行程時間軸</h2>
+        <div class="timeline-actions">
+          <button type="button" class="secondary slim" id="btn-trip-map">整趟地圖</button>
+          <button type="button" class="secondary slim" id="btn-export-pdf">匯出 PDF</button>
+          <button type="button" class="secondary slim" id="btn-open-guide">規劃</button>
+        </div>
       </div>
       <div class="block-toggles" role="group" aria-label="顯示分類">
         ${blockToggleHtml('activity', '活動', counts.activity, prefs.activity)}
@@ -1103,7 +1113,7 @@ function renderTimeline() {
         ${blockToggleHtml('stay', '住宿', counts.stay, prefs.stay)}
         ${blockToggleHtml('ride', '交通', counts.ride, prefs.ride)}
       </div>
-      ${days.length ? days.map(([date, countries]) => {
+      ${days.length ? `<div class="day-pager" id="day-pager">${days.map(([date, countries]) => {
         const acts = sortedByTime(trip.days?.[date] || [], 'time');
         const actNext = activitiesContinuing(date);
         const foods = sortedByTime((trip.restaurants || []).filter((r) => r.date === date), 'time');
@@ -1125,6 +1135,7 @@ function renderTimeline() {
               <button class="ghost" data-day-map="${date}" type="button">地圖</button>
               <button class="ghost ${prefs.activity ? '' : 'hidden'}" data-add-act="${date}" type="button">+ 活動</button>
             </div>
+            ${spotDayHtml(date)}
             <div class="timeline ${prefs.activity ? '' : 'hidden'}">
               ${acts.map((a) => {
                 const clock = activityScheduleText(a, date, false);
@@ -1265,8 +1276,9 @@ function renderTimeline() {
             </div>
           </div>
         `;
-      }).join('') : '<div class="muted">請先為國家設定日期區間</div>'}
+      }).join('')}</div>` : '<div class="muted">請先為國家設定日期區間</div>'}
     </div>
+    ${spotDockHtml()}
   `;
   ensurePlaceReviews(reviewQueries);
   applySingleCandidateContact(reviewEntries);
@@ -1290,6 +1302,9 @@ function renderTimeline() {
   $('#btn-import')?.addEventListener('click', () => openImportSheet());
   $('#btn-trip-map')?.addEventListener('click', () => openMapSheet(null));
   $('#btn-export-pdf')?.addEventListener('click', exportTripPdf);
+  $('#btn-open-guide')?.addEventListener('click', () => openGuide(state.trip.guide?.step || 0));
+  $$('[data-open-guide]', el).forEach((btn) => btn.addEventListener('click', () => openGuide(state.trip.guide?.step || 0)));
+  bindSpotDrag(el);
   $$('[data-day-map]', el).forEach((btn) => btn.addEventListener('click', () => openMapSheet(btn.dataset.dayMap)));
   $('#btn-save-device-timeline')?.addEventListener('click', async () => {
     try {
@@ -1335,6 +1350,13 @@ function renderTimeline() {
   }));
   $$('[data-del-act]', el).forEach((btn) => btn.addEventListener('click', async () => {
     const date = btn.dataset.actDate;
+    const removed = (trip.days?.[date] || []).find((a) => a.id === btn.dataset.delAct);
+    if (removed?.spotId) {
+      const spots = (trip.spots || []).map((spot) => spot.id === removed.spotId ? { ...spot, day: '' } : spot);
+      await persistSpots(spots);
+      toast('已放回景點池');
+      return;
+    }
     const daysObj = { ...(trip.days || {}) };
     daysObj[date] = (daysObj[date] || []).filter((a) => a.id !== btn.dataset.delAct);
     await saveTrip({ days: daysObj });
@@ -1543,6 +1565,8 @@ function buildBackup(includePrivate) {
       transports: trip.transports || [],
       expenses: trip.expenses || [],
       flights: trip.flights || emptyFlights(),
+      guide: trip.guide || {},
+      spots: trip.spots || [],
       createdAt: trip.createdAt,
       updatedAt: trip.updatedAt,
     },
@@ -3575,6 +3599,431 @@ function openImportSheet() {
   })();
 }
 
+const GUIDE_STEPS = ['目的地', '怎麼去', '往返', '住宿', '景點', '排一天'];
+const GUIDE_MODES = ['飛機', '火車', '巴士', '船', '自駕', '其他'];
+
+function currentGuide() {
+  const src = state.trip?.guide || {};
+  return {
+    step: Number(src.step) || 0,
+    destination: src.destination || '',
+    countryId: src.countryId || '',
+    transportMode: src.transportMode || '',
+    departDate: src.departDate || '',
+    departTime: src.departTime || '',
+    returnDate: src.returnDate || '',
+    returnTime: src.returnTime || '',
+    lodgingChoice: src.lodgingChoice || '',
+    outboundId: src.outboundId || '',
+    returnId: src.returnId || '',
+  };
+}
+
+function spotThumb(spot) {
+  if (spot.thumb) return `<img src="${escapeHtml(spot.thumb)}" alt="" />`;
+  return `<span class="spot-fallback">${escapeHtml(String(spot.name || '?').slice(0, 1))}</span>`;
+}
+
+function spotsFor(day) {
+  return (state.trip?.spots || []).filter((spot) => (day ? spot.day === day : !spot.day)).sort((a, b) => a.order - b.order);
+}
+
+function spotChip(spot) {
+  return `<button type="button" class="spot-chip" data-spot="${escapeHtml(spot.id)}">${spotThumb(spot)}<span>${escapeHtml(spot.name)}</span></button>`;
+}
+
+function spotDayHtml(date) {
+  const spots = spotsFor(date);
+  const bits = [];
+  spots.forEach((spot, index) => {
+    bits.push(spotChip(spot));
+    const next = spots[index + 1];
+    if (next && spot.lat != null && next.lat != null && spot.lng != null && next.lng != null) {
+      bits.push(`<div class="spot-distance">${straightLineLabel(haversineKm(spot, next))}</div>`);
+    }
+  });
+  return `<div class="spot-day" data-drop-day="${date}">${bits.join('') || '<div class="muted">把景點拖到這一天</div>'}</div>`;
+}
+
+function arrangeDaysHtml() {
+  const days = buildTimelineDays();
+  if (!days.length) return '<div class="muted">先設定出發與回程，才有日期可以排。</div>';
+  return `<div class="day-pager wizard-days">${days.map(([date]) => `
+    <section class="day">
+      <strong>${date}（週${weekday(date)}）</strong>
+      ${spotDayHtml(date)}
+    </section>`).join('')}</div>`;
+}
+
+function spotDockHtml(options = {}) {
+  const pool = spotsFor('');
+  const guideBtn = options.guide === false ? '' : '<button type="button" class="secondary slim" data-open-guide>一步一步排</button>';
+  return `
+    <div class="spot-dock">
+      <div class="row"><strong>景點池</strong>${guideBtn}</div>
+      <div class="spot-pool" data-drop-pool>${pool.map(spotChip).join('') || '<div class="muted">搜尋景點後會出現在這裡</div>'}</div>
+    </div>`;
+}
+
+function modeToRide(mode) {
+  return { '飛機': '飛機', '火車': '火車', '巴士': '巴士', '自駕': '租車' }[mode] || '其他';
+}
+
+async function saveGuide(guide, extra = {}) {
+  await saveTrip({ guide, ...extra });
+}
+
+async function applyGuideDestination(name) {
+  const guide = currentGuide();
+  const typed = String(name || '').trim().slice(0, 40);
+  const preset = matchPreset(typed);
+  const countries = (state.trip.countries || []).slice();
+  let country = countries.find((item) => item.id === guide.countryId);
+  const next = {
+    name: typed,
+    code: preset?.code || country?.code || '',
+    tz: preset?.tz || country?.tz || 'UTC',
+    currency: preset?.currency || country?.currency || 'TWD',
+    start: guide.departDate || country?.start || '',
+    end: guide.returnDate || country?.end || '',
+  };
+  if (!next.name) throw new Error('請填目的地');
+  if (country) {
+    country = { ...country, ...next };
+    const id = country.id;
+    await saveGuide({ ...guide, destination: next.name, countryId: id }, {
+      countries: countries.map((item) => item.id === id ? country : item),
+    });
+    return;
+  }
+  country = { id: uid(), ...next };
+  await saveGuide({ ...guide, destination: next.name, countryId: country.id }, { countries: countries.concat([country]) });
+}
+
+async function applyGuideTravel(guide) {
+  if (!guide.departDate || !guide.returnDate || guide.returnDate < guide.departDate) throw new Error('請設定出發與回程日期');
+  const countries = (state.trip.countries || []).map((country) => country.id === guide.countryId ? { ...country, start: guide.departDate, end: guide.returnDate } : country);
+  let transports = (state.trip.transports || []).slice();
+  const rideType = modeToRide(guide.transportMode);
+  const writeRide = (id, fields) => {
+    if (id && transports.some((ride) => ride.id === id)) {
+      transports = transports.map((ride) => ride.id === id ? { ...ride, ...fields, id } : ride);
+      return id;
+    }
+    const nextId = uid();
+    transports.push({ id: nextId, ...fields });
+    return nextId;
+  };
+  guide.outboundId = writeRide(guide.outboundId, {
+    date: guide.departDate, type: rideType, from: '', to: guide.destination, depart: guide.departTime || '', arrive: '', arriveDate: '', note: '去程',
+  });
+  guide.returnId = writeRide(guide.returnId, {
+    date: guide.returnDate, type: rideType, from: guide.destination, to: '', depart: guide.returnTime || '', arrive: '', arriveDate: '', note: '回程',
+  });
+  await saveGuide(guide, { countries, transports });
+}
+
+function syncSpots(spots) {
+  const original = state.trip.days || {};
+  const previous = {};
+  for (const list of Object.values(original)) {
+    for (const activity of list || []) {
+      if (activity?.spotId) previous[activity.spotId] = activity;
+    }
+  }
+  const days = JSON.parse(JSON.stringify(original));
+  for (const key of Object.keys(days)) {
+    days[key] = (days[key] || []).filter((activity) => !activity.spotId || spots.some((spot) => spot.id === activity.spotId && spot.day === key));
+  }
+  const groups = {};
+  spots.filter((spot) => spot.day).sort((a, b) => a.order - b.order).forEach((spot) => {
+    if (!groups[spot.day]) groups[spot.day] = [];
+    groups[spot.day].push(spot);
+  });
+  for (const [day, list] of Object.entries(groups)) {
+    const existing = days[day] || [];
+    const others = existing.filter((activity) => !activity.spotId);
+    days[day] = others.concat(list.map((spot) => {
+      const prev = previous[spot.id] || {};
+      return {
+        id: prev.id || uid(),
+        spotId: spot.id,
+        text: spot.name,
+        place: spot.name,
+        lat: spot.lat,
+        lng: spot.lng,
+        time: prev.time || '',
+        endTime: prev.endTime || '',
+        endDate: prev.endDate || '',
+      };
+    }));
+  }
+  return days;
+}
+
+function updateSpots(mutate) {
+  const run = async () => {
+    const current = (state.trip?.spots || []).map((spot) => ({ ...spot }));
+    const ordered = mutate(current).map((spot, index) => ({ ...spot, order: index }));
+    await putTrip({ spots: ordered, days: syncSpots(ordered) });
+    document.dispatchEvent(new CustomEvent('spots-changed'));
+  };
+  saveChain = saveChain.then(run, run);
+  return saveChain;
+}
+
+function persistSpots(spots) {
+  return updateSpots(() => spots);
+}
+
+async function askGuide(step, note) {
+  const key = localStorage.getItem('tp_openai_key') || '';
+  const data = await api(`/api/trips/${state.trip.id}/assist`, {
+    method: 'POST',
+    body: JSON.stringify({ memberId: state.memberId, step, note, ...(key ? { apiKey: key } : {}) }),
+  });
+  return data;
+}
+
+function openGuide(startStep) {
+  const steps = GUIDE_STEPS;
+  let step = Math.max(0, Math.min(steps.length - 1, startStep || 0));
+  const wrap = document.createElement('div');
+  wrap.className = 'modal-backdrop';
+  document.body.appendChild(wrap);
+  const onSpots = () => { if (wrap.isConnected && step >= 4) paint(); };
+  document.addEventListener('spots-changed', onSpots);
+  const close = () => { document.removeEventListener('spots-changed', onSpots); wrap.remove(); };
+  const paint = () => {
+    const guide = currentGuide();
+    wrap.innerHTML = `
+      <div class="modal">
+        <div class="muted">第 ${step + 1} / ${steps.length} 步</div>
+        <div class="wizard-steps">${steps.map((label, index) => `<button type="button" class="${index === step ? 'on' : ''}" data-step="${index}">${index + 1}. ${label}</button>`).join('')}</div>
+        <div class="wizard-pane" id="wizard-pane"></div>
+        <div id="wizard-ai"></div>
+        <div class="actions">
+          <button type="button" class="secondary" id="wizard-prev" ${step === 0 ? 'disabled' : ''}>上一步</button>
+          <button type="button" id="wizard-next">${step === steps.length - 1 ? '完成' : '下一步'}</button>
+        </div>
+        <button type="button" class="ghost" id="wizard-close">先離開，等等再排</button>
+      </div>`;
+    const pane = $('#wizard-pane', wrap);
+    if (step === 0) {
+      pane.innerHTML = `<h3>想去哪裡？</h3><label>目的地</label><input id="g-dest" maxlength="40" value="${escapeHtml(guide.destination)}" placeholder="例如：京都" /><button type="button" class="secondary" id="g-ai">幫我想想</button>`;
+    } else if (step === 1) {
+      pane.innerHTML = `<h3>怎麼去？</h3><div class="mode-grid">${GUIDE_MODES.map((mode) => `<button type="button" class="${guide.transportMode === mode ? 'on' : ''}" data-mode="${mode}">${mode}</button>`).join('')}</div><button type="button" class="secondary" id="g-ai">交通小提醒</button>`;
+    } else if (step === 2) {
+      pane.innerHTML = `<h3>出發與回來</h3><label>出發日</label><input id="g-depart-date" type="date" value="${escapeHtml(guide.departDate)}" /><label>出發時間</label><input id="g-depart-time" type="time" value="${escapeHtml(guide.departTime)}" /><label>回程日</label><input id="g-return-date" type="date" value="${escapeHtml(guide.returnDate)}" /><label>回程時間</label><input id="g-return-time" type="time" value="${escapeHtml(guide.returnTime)}" /><button type="button" class="secondary" id="g-ai">這樣排會不會太趕</button>`;
+    } else if (step === 3) {
+      pane.innerHTML = `<h3>住宿訂了嗎？</h3><div class="mode-grid"><button type="button" data-stay="yes" class="${guide.lodgingChoice === 'yes' ? 'on' : ''}">訂好了</button><button type="button" data-stay="no" class="${guide.lodgingChoice === 'no' ? 'on' : ''}">還沒</button><button type="button" data-stay="later" class="${guide.lodgingChoice === 'later' ? 'on' : ''}">晚點再說</button></div><label>貼上訂房文字</label><textarea id="g-hotel" rows="3" placeholder="飯店名、入住與退房日期"></textarea><button type="button" class="secondary" id="g-hotel-read">讀這段訂房</button><button type="button" class="ghost" id="g-hotel-manual">自己填一間</button><button type="button" class="secondary" id="g-ai">住宿小建議</button>`;
+    } else if (step === 4) {
+      pane.innerHTML = `<h3>想去的地方</h3><label>搜尋景點</label><input id="g-spot" maxlength="80" placeholder="例如：清水寺" /><button type="button" id="g-spot-add">加入景點池</button><button type="button" class="secondary" id="g-ai">推薦幾個景點</button><div class="spot-pool">${spotsFor('').map(spotChip).join('') || '<div class="muted">還沒有景點</div>'}</div>`;
+    } else {
+      pane.innerHTML = `<h3>排進每一天</h3><div class="muted">左右滑看每一天。把景點拖進去，或拖回景點池。</div><button type="button" class="secondary" id="g-ai">幫我排進日期</button>${arrangeDaysHtml()}${spotDockHtml({ guide: false })}`;
+    }
+    $$('[data-step]', wrap).forEach((btn) => btn.addEventListener('click', async () => {
+      try { await collect(false); step = Number(btn.dataset.step); paint(); } catch (err) { toast(err.message || '先完成這一步'); }
+    }));
+    $$('[data-mode]', wrap).forEach((btn) => btn.addEventListener('click', async () => {
+      await saveGuide({ ...currentGuide(), transportMode: btn.dataset.mode, step });
+      paint();
+    }));
+    $$('[data-stay]', wrap).forEach((btn) => btn.addEventListener('click', async () => {
+      await saveGuide({ ...currentGuide(), lodgingChoice: btn.dataset.stay, step });
+      paint();
+    }));
+    $('#wizard-prev', wrap)?.addEventListener('click', async () => {
+      try {
+        await collect(false);
+        step -= 1;
+        await saveGuide({ ...currentGuide(), step });
+        paint();
+      } catch (err) { toast(err.message || '先完成這一步'); }
+    });
+    $('#wizard-next', wrap)?.addEventListener('click', async () => {
+      try {
+        await collect(true);
+        if (step === steps.length - 1) { close(); toast('先排到這裡，隨時可以再改'); return; }
+        step += 1;
+        await saveGuide({ ...currentGuide(), step });
+        paint();
+      } catch (err) { toast(err.message || '這一步還沒好'); }
+    });
+    $('#wizard-close', wrap)?.addEventListener('click', async () => { try { await collect(false); } catch (_) {} close(); });
+    $('#g-ai', wrap)?.addEventListener('click', () => runGuideAi());
+    $('#g-spot-add', wrap)?.addEventListener('click', async () => {
+      try { await addSpotFromSearch($('#g-spot', wrap)?.value || ''); paint(); }
+      catch (err) { toast(err.message || '沒加入'); }
+    });
+    $('#g-hotel-manual', wrap)?.addEventListener('click', () => openStayModal({ defaults: { checkIn: currentGuide().departDate, checkOut: currentGuide().returnDate, countryName: currentGuide().destination } }));
+    $('#g-hotel-read', wrap)?.addEventListener('click', () => readHotelPaste($('#g-hotel', wrap)?.value || ''));
+    bindSpotDrag(wrap);
+  };
+  async function collect(strict) {
+    const guide = { ...currentGuide(), step };
+    if (step === 0) {
+      const name = $('#g-dest', wrap)?.value.trim() || guide.destination;
+      if (strict && !name) throw new Error('請填目的地');
+      if (name) await applyGuideDestination(name);
+      else await saveGuide(guide);
+    } else if (step === 1) {
+      const next = { ...currentGuide(), step };
+      if (strict && !next.transportMode) throw new Error('請選一種交通');
+      if (next.departDate && next.returnDate && next.returnDate >= next.departDate) await applyGuideTravel(next);
+      else await saveGuide(next);
+    } else if (step === 2) {
+      guide.departDate = $('#g-depart-date', wrap)?.value || '';
+      guide.departTime = $('#g-depart-time', wrap)?.value || '';
+      guide.returnDate = $('#g-return-date', wrap)?.value || '';
+      guide.returnTime = $('#g-return-time', wrap)?.value || '';
+      if (guide.departDate && guide.returnDate && guide.returnDate >= guide.departDate) await applyGuideTravel(guide);
+      else if (strict) throw new Error('請設定出發與回程日期');
+      else await saveGuide(guide);
+    } else if (step === 3) {
+      await saveGuide(guide);
+    } else {
+      await saveGuide(guide);
+    }
+  }
+  async function runGuideAi() {
+    const box = $('#wizard-ai', wrap);
+    box.innerHTML = '<div class="muted">正在想…</div>';
+    try {
+      const note = $('#g-dest', wrap)?.value || $('#g-hotel', wrap)?.value || '';
+      const data = await askGuide(GUIDE_STEPS[step], note);
+      if (data.enabled === false) {
+        box.innerHTML = '<div class="muted">AI 還沒設定，我們先自己填就好。</div>';
+        return;
+      }
+      box.innerHTML = `<div class="muted">${escapeHtml(data.text || '')}</div><div class="idea-row">${(data.ideas || []).map((idea) => `<button type="button" data-idea="${escapeHtml(idea)}">${escapeHtml(idea)}</button>`).join('')}</div>`;
+      $$('[data-idea]', box).forEach((btn) => btn.addEventListener('click', () => applyIdea(btn.dataset.idea)));
+    } catch (err) {
+      box.innerHTML = `<div class="muted">${escapeHtml(err.message || '這次沒有建議，可以先自己填。')}</div>`;
+    }
+  }
+  async function applyIdea(idea) {
+    if (step === 0) {
+      const input = $('#g-dest', wrap);
+      if (input) input.value = idea;
+    } else if (step === 1) {
+      const mode = GUIDE_MODES.find((item) => idea.includes(item));
+      if (mode) await saveGuide({ ...currentGuide(), transportMode: mode, step });
+    } else if (step === 4) {
+      const name = idea.split('|')[0].trim();
+      if (name) await addSpotFromSearch(name);
+    } else if (step === 5 && idea.includes('|')) {
+      const [name, date] = idea.split('|').map((part) => part.trim());
+      const spots = (state.trip.spots || []).map((spot) => spot.name === name && /^\d{4}-\d{2}-\d{2}$/.test(date || '') ? { ...spot, day: date } : spot);
+      await persistSpots(spots);
+    }
+    paint();
+  }
+  paint();
+}
+
+async function addSpotFromSearch(raw) {
+  const query = String(raw || '').trim();
+  if (!query) throw new Error('請輸入景點名稱');
+  let place = { displayName: query, lat: null, lng: null, thumb: '' };
+  try {
+    place = await api(`/api/place?q=${encodeURIComponent(`${query} ${currentGuide().destination || ''}`.trim())}`);
+  } catch (err) {
+    toast(err.message || '先用名稱加進去，座標稍後再補');
+  }
+  const name = String(place.displayName || query).split(',')[0].slice(0, 80);
+  const spots = (state.trip.spots || []).concat([{
+    id: uid(), name, day: '', order: (state.trip.spots || []).length,
+    lat: place.lat ?? null, lng: place.lng ?? null, thumb: place.thumb || '',
+  }]);
+  await persistSpots(spots);
+  toast(place.thumb ? '已加入景點，附上小圖' : '已加入景點');
+}
+
+async function readHotelPaste(text) {
+  if (!String(text || '').trim()) {
+    toast('先貼上訂房文字，或改自己填');
+    return;
+  }
+  try {
+    const key = localStorage.getItem('tp_openai_key') || '';
+    const data = await api(`/api/trips/${state.trip.id}/import`, {
+      method: 'POST',
+      body: JSON.stringify({ memberId: state.memberId, text, ...(key ? { apiKey: key } : {}) }),
+    });
+    const draft = importDraftFrom(data.extraction).filter((item) => item.kind === 'lodging');
+    if (!draft.length) {
+      toast(data.enabled === false ? 'AI 還沒設定，可以自己填住宿' : '沒有讀出住宿，可以自己填');
+      return;
+    }
+    const result = await commitImport(draft);
+    await saveGuide({ ...currentGuide(), lodgingChoice: 'yes' });
+    toast(result.message, 4000);
+  } catch (err) {
+    toast(err.message || '沒讀出來，可以自己填');
+  }
+}
+
+function bindSpotDrag(root) {
+  let drag = null;
+  const ghost = () => document.getElementById('spot-ghost');
+  $$('[data-spot]', root).forEach((chip) => {
+    chip.addEventListener('pointerdown', (event) => {
+      if (event.button != null && event.button !== 0) return;
+      drag = { id: chip.dataset.spot, x: event.clientX, y: event.clientY, moved: false };
+      try { chip.setPointerCapture(event.pointerId); } catch (_) { /* pointer already gone */ }
+    });
+    chip.addEventListener('pointercancel', () => {
+      ghost()?.remove();
+      drag = null;
+    });
+    chip.addEventListener('pointermove', (event) => {
+      if (!drag || drag.id !== chip.dataset.spot) return;
+      if (Math.hypot(event.clientX - drag.x, event.clientY - drag.y) > 8) drag.moved = true;
+      if (!drag.moved) return;
+      let node = ghost();
+      if (!node) {
+        node = chip.cloneNode(true);
+        node.id = 'spot-ghost';
+        node.classList.add('spot-ghost');
+        document.body.appendChild(node);
+      }
+      node.style.left = `${event.clientX + 8}px`;
+      node.style.top = `${event.clientY + 8}px`;
+    });
+    chip.addEventListener('pointerup', async (event) => {
+      if (!drag || drag.id !== chip.dataset.spot) return;
+      ghost()?.remove();
+      const moved = drag.moved;
+      const id = drag.id;
+      drag = null;
+      if (!moved) return;
+      chip.style.visibility = 'hidden';
+      const target = document.elementFromPoint(event.clientX, event.clientY);
+      chip.style.visibility = '';
+      const dayEl = target?.closest('[data-drop-day]');
+      const pool = target?.closest('[data-drop-pool]');
+      const beforeId = target?.closest('[data-spot]')?.dataset.spot || '';
+      const dropDay = dayEl?.dataset.dropDay || '';
+      if (!pool && !dropDay) return;
+      try {
+        await updateSpots((spots) => {
+          const spot = spots.find((item) => item.id === id);
+          if (!spot) return spots;
+          spot.day = pool ? '' : dropDay;
+          const same = spots.filter((item) => item.day === spot.day && item.id !== spot.id);
+          const rest = spots.filter((item) => item.day !== spot.day);
+          let index = same.length;
+          if (beforeId && beforeId !== id) index = same.findIndex((item) => item.id === beforeId);
+          if (index < 0) index = same.length;
+          same.splice(index, 0, spot);
+          return rest.concat(same);
+        });
+      } catch (err) { toast(err.message || '沒有移成'); }
+    });
+  });
+}
+
 function bindHome() {
   $('#form-create').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -3589,6 +4038,7 @@ function bindHome() {
       await loadRates(false).catch(() => {});
       showApp();
       toast('旅行已建立');
+      openGuide(0);
     } catch (err) {
       toast(err.message);
     }
@@ -3715,6 +4165,13 @@ function maybeRemindDepartures() {
     new Notification('Leo prototype', { body: `明天早出發：${hits.slice(0, 3).join('、')}`, lang: 'zh-Hant' });
     localStorage.setItem(key, '1');
   } catch (_) { /* permission or unsupported constructor */ }
+}
+
+function straightLineLabel(km) {
+  if (!Number.isFinite(km)) return '';
+  if (km < 1) return `直線約 ${Math.max(1, Math.round(km * 1000))} 公尺`;
+  const rounded = km < 10 ? km.toFixed(1) : String(Math.round(km));
+  return `直線約 ${rounded} 公里`;
 }
 
 function haversineKm(a, b) {

@@ -114,8 +114,48 @@ function publicTrip(trip) {
     transports: asList(trip.transports),
     expenses: trip.expenses || [],
     flights: sanitizeFlights(trip.flights),
+    guide: sanitizeGuide(trip.guide),
+    spots: sanitizeSpots(trip.spots),
     updatedAt: trip.updatedAt,
   };
+}
+
+function sanitizeGuide(guide) {
+  const src = guide && typeof guide === 'object' ? guide : {};
+  const modes = ['飛機', '火車', '巴士', '船', '自駕', '其他'];
+  const mode = modes.includes(src.transportMode) ? src.transportMode : '';
+  const day = (value) => /^\d{4}-\d{2}-\d{2}$/.test(String(value || '')) ? String(value) : '';
+  const time = (value) => /^\d{2}:\d{2}$/.test(String(value || '')) ? String(value) : '';
+  const choice = ['yes', 'no', 'later'].includes(src.lodgingChoice) ? src.lodgingChoice : '';
+  return {
+    step: Math.max(0, Math.min(5, Number(src.step) || 0)),
+    destination: String(src.destination || '').trim().slice(0, 40),
+    countryId: String(src.countryId || '').slice(0, 40),
+    transportMode: mode,
+    departDate: day(src.departDate),
+    departTime: time(src.departTime),
+    returnDate: day(src.returnDate),
+    returnTime: time(src.returnTime),
+    lodgingChoice: choice,
+    outboundId: String(src.outboundId || '').slice(0, 40),
+    returnId: String(src.returnId || '').slice(0, 40),
+  };
+}
+
+function sanitizeSpots(spots) {
+  return asList(spots).slice(0, 80).map((spot) => {
+    const lat = Number(spot?.lat);
+    const lng = Number(spot?.lng);
+    return {
+      id: String(spot?.id || '').slice(0, 40),
+      name: String(spot?.name || '').trim().slice(0, 80),
+      day: /^\d{4}-\d{2}-\d{2}$/.test(String(spot?.day || '')) ? String(spot.day) : '',
+      order: Number.isFinite(Number(spot?.order)) ? Number(spot.order) : 0,
+      lat: Number.isFinite(lat) ? lat : null,
+      lng: Number.isFinite(lng) ? lng : null,
+      thumb: String(spot?.thumb || '').slice(0, 1000),
+    };
+  }).filter((spot) => spot.id && spot.name);
 }
 
 function sanitizeLeg(leg) {
@@ -213,49 +253,139 @@ function withGeoSlot(fn) {
   return run;
 }
 
-app.get('/api/geocode', async (req, res) => {
-  const query = String(req.query.q || '').trim().replace(/\s+/g, ' ').slice(0, 200);
-  if (!query) return res.status(400).json({ error: '缺少地點' });
+async function lookupGeo(query) {
   const key = query.toLowerCase();
   const cache = readGeoCache();
   const hit = cache[key];
   if (hit && Number.isFinite(hit.lat) && Number.isFinite(hit.lng)) {
-    return res.json({ lat: hit.lat, lng: hit.lng, displayName: hit.displayName || query, cached: true });
+    return { lat: hit.lat, lng: hit.lng, displayName: hit.displayName || query, cached: true };
   }
-  try {
-    const found = await withGeoSlot(async () => {
-      const again = readGeoCache();
-      if (again[key] && Number.isFinite(again[key].lat)) return again[key];
-      const base = String(process.env.GEOCODE_API_URL || 'https://nominatim.openstreetmap.org/search').trim();
-      const url = `${base}${base.includes('?') ? '&' : '?'}format=jsonv2&limit=1&q=${encodeURIComponent(query)}`;
-      const upstream = await fetch(url, {
-        headers: {
-          'User-Agent': 'LeoPrototype/1.0 (https://travel-proto.onrender.com)',
-          Accept: 'application/json',
-        },
-        signal: AbortSignal.timeout(12000),
-      });
-      const data = await upstream.json().catch(() => []);
-      const place = Array.isArray(data) ? data[0] : null;
-      const lat = Number(place?.lat);
-      const lng = Number(place?.lon ?? place?.lng);
-      if (!upstream.ok || !Number.isFinite(lat) || !Number.isFinite(lng)) return null;
-      const saved = {
-        lat,
-        lng,
-        displayName: String(place.display_name || query).slice(0, 160),
-        fetchedAt: new Date().toISOString(),
-      };
-      const next = readGeoCache();
-      next[key] = saved;
-      writeGeoCache(next);
-      return saved;
+  const found = await withGeoSlot(async () => {
+    const again = readGeoCache();
+    if (again[key] && Number.isFinite(again[key].lat)) {
+      return { lat: again[key].lat, lng: again[key].lng, displayName: again[key].displayName || query, cached: true };
+    }
+    const base = String(process.env.GEOCODE_API_URL || 'https://nominatim.openstreetmap.org/search').trim();
+    const url = `${base}${base.includes('?') ? '&' : '?'}format=jsonv2&limit=1&q=${encodeURIComponent(query)}`;
+    const upstream = await fetch(url, {
+      headers: {
+        'User-Agent': 'LeoPrototype/1.0 (https://travel-proto.onrender.com)',
+        Accept: 'application/json',
+      },
+      signal: AbortSignal.timeout(12000),
     });
+    const data = await upstream.json().catch(() => []);
+    const place = Array.isArray(data) ? data[0] : null;
+    const lat = Number(place?.lat);
+    const lng = Number(place?.lon ?? place?.lng);
+    if (!upstream.ok || !Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    const saved = {
+      lat,
+      lng,
+      displayName: String(place.display_name || query).slice(0, 160),
+      fetchedAt: new Date().toISOString(),
+    };
+    const next = readGeoCache();
+    next[key] = saved;
+    writeGeoCache(next);
+    return { ...saved, cached: false };
+  });
+  return found;
+}
+
+app.get('/api/geocode', async (req, res) => {
+  const query = String(req.query.q || '').trim().replace(/\s+/g, ' ').slice(0, 200);
+  if (!query) return res.status(400).json({ error: '缺少地點' });
+  try {
+    const found = await lookupGeo(query);
     if (!found) return res.status(404).json({ error: '找不到這個地點' });
-    res.json({ lat: found.lat, lng: found.lng, displayName: found.displayName || query, cached: false });
+    res.json({ lat: found.lat, lng: found.lng, displayName: found.displayName || query, cached: !!found.cached });
   } catch (err) {
     console.error('geocode failed', err?.name || 'error');
     res.status(502).json({ error: '暫時無法查詢地點' });
+  }
+});
+
+async function wikiThumb(query) {
+  const url = `https://zh.wikipedia.org/w/api.php?action=query&format=json&generator=search&gsrlimit=1&gsrsearch=${encodeURIComponent(query)}&prop=pageimages&piprop=thumbnail&pithumbsize=240`;
+  const upstream = await fetch(url, {
+    headers: {
+      'User-Agent': 'LeoPrototype/1.0 (https://travel-proto.onrender.com)',
+      Accept: 'application/json',
+    },
+    signal: AbortSignal.timeout(8000),
+  });
+  const data = await upstream.json().catch(() => ({}));
+  const pages = data?.query?.pages || {};
+  const page = Object.values(pages)[0];
+  return String(page?.thumbnail?.source || '').slice(0, 1000);
+}
+
+app.get('/api/place', async (req, res) => {
+  const query = String(req.query.q || '').trim().replace(/\s+/g, ' ').slice(0, 200);
+  if (!query) return res.status(400).json({ error: '缺少地點' });
+  try {
+    const geo = await lookupGeo(query);
+    if (!geo) return res.status(404).json({ error: '找不到這個地點' });
+    let thumb = '';
+    try { thumb = await wikiThumb(query); } catch (_) { thumb = ''; }
+    res.json({ lat: geo.lat, lng: geo.lng, displayName: geo.displayName || query, cached: !!geo.cached, thumb });
+  } catch (err) {
+    console.error('place lookup failed', err?.name || 'error');
+    res.status(502).json({ error: '暫時無法查詢地點' });
+  }
+});
+
+const ASSIST_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    text: { type: 'string' },
+    ideas: { type: 'array', items: { type: 'string' } },
+  },
+  required: ['text', 'ideas'],
+};
+
+app.post('/api/trips/:tripId/assist', async (req, res) => {
+  const db = readDb();
+  const trip = db.trips[req.params.tripId];
+  if (!trip) return res.status(404).json({ error: '找不到旅行' });
+  const body = req.body || {};
+  if (!body.memberId || !(trip.members || []).some((m) => m.id === body.memberId)) {
+    return res.status(403).json({ error: '無效的成員' });
+  }
+  const providedKey = typeof body.apiKey === 'string' ? body.apiKey.trim() : '';
+  const apiKey = providedKey || serverOpenAIKey();
+  if (!apiKey) return res.json({ enabled: false });
+  const step = String(body.step || 'note').slice(0, 40);
+  const note = String(body.note || '').trim().slice(0, 2000);
+  const guide = sanitizeGuide(trip.guide);
+  const spotNames = sanitizeSpots(trip.spots).map((s) => s.name).join('、');
+  const messages = [
+    { role: 'system', content: '你是溫柔的旅行小夥伴。用繁體中文，短短幾句，不要捏造訂位。ideas 給 3 到 6 個可點選的短句。若是安排景點，每個 idea 用「景點名|YYYY-MM-DD」。' },
+    { role: 'user', content: `步驟：${step}\n目的地：${guide.destination || '尚未填'}\n交通：${guide.transportMode || '尚未填'}\n出發：${guide.departDate || '?'} ${guide.departTime || ''}\n回程：${guide.returnDate || '?'} ${guide.returnTime || ''}\n景點：${spotNames || '還沒有'}\n使用者補充：${note || '無'}` },
+  ];
+  try {
+    const result = await callOpenAI({
+      apiKey,
+      model: openAIModel(),
+      messages,
+      maxTokens: 2000,
+      reasoning: /gpt-5/i.test(openAIModel()),
+      schema: ASSIST_SCHEMA,
+      schemaName: 'trip_assist',
+    });
+    if (!result.ok) return res.status(502).json({ enabled: true, error: friendlyOpenAIError(result.status, result.data) });
+    const reading = readModelResult(result);
+    if (!reading.parsed) return res.status(502).json({ enabled: true, error: '這次沒有整理出建議，可以先自己填。' });
+    res.json({
+      enabled: true,
+      text: String(reading.parsed.text || '').slice(0, 600),
+      ideas: asList(reading.parsed.ideas).map((idea) => String(idea).slice(0, 80)).slice(0, 6),
+    });
+  } catch (err) {
+    console.error('assist failed', err?.name || 'error');
+    res.status(502).json({ enabled: true, error: '這次沒有連上建議，可以先自己填。' });
   }
 });
 
@@ -412,6 +542,8 @@ function sanitizeBackupTrip(raw) {
       transports: asList(raw.transports),
       expenses: asList(raw.expenses),
       flights: sanitizeFlights(raw.flights),
+      guide: sanitizeGuide(raw.guide),
+      spots: sanitizeSpots(raw.spots),
       createdAt: raw.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     },
@@ -459,6 +591,8 @@ app.put('/api/trips/:tripId', (req, res) => {
     trip.countries = sanitizeCountries(body.countries);
   }
   if (body.flights && typeof body.flights === 'object') trip.flights = sanitizeFlights(body.flights);
+  if (body.guide && typeof body.guide === 'object') trip.guide = sanitizeGuide(body.guide);
+  if (Array.isArray(body.spots)) trip.spots = sanitizeSpots(body.spots);
   if (body.days && typeof body.days === 'object') trip.days = body.days;
   if (Array.isArray(body.restaurants)) trip.restaurants = body.restaurants;
   if (Array.isArray(body.lodgings)) trip.lodgings = body.lodgings;
@@ -935,13 +1069,13 @@ function parseModelJson(text) {
   return JSON.parse(src);
 }
 
-async function callOpenAI({ apiKey, model, messages, maxTokens, reasoning }) {
+async function callOpenAI({ apiKey, model, messages, maxTokens, reasoning, schema, schemaName }) {
   const body = {
     model,
     messages,
     response_format: {
       type: 'json_schema',
-      json_schema: { name: 'itinerary_import', strict: true, schema: IMPORT_SCHEMA },
+      json_schema: { name: schemaName || 'itinerary_import', strict: true, schema: schema || IMPORT_SCHEMA },
     },
     max_completion_tokens: maxTokens,
   };
