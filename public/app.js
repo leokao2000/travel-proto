@@ -3934,7 +3934,7 @@ async function addSpotFromSearch(raw) {
   const name = String(place.displayName || query).split(',')[0].slice(0, 80);
   const spots = (state.trip.spots || []).concat([{
     id: uid(), name, day: '', order: (state.trip.spots || []).length,
-    lat: place.lat ?? null, lng: place.lng ?? null, thumb: place.thumb || '',
+    lat: finiteCoord(place.lat), lng: finiteCoord(place.lng), thumb: place.thumb || '',
   }]);
   await persistSpots(spots);
   toast(place.thumb ? '已加入景點，附上小圖' : '已加入景點');
@@ -4167,21 +4167,31 @@ function maybeRemindDepartures() {
   } catch (_) { /* permission or unsupported constructor */ }
 }
 
+function finiteCoord(value) {
+  const n = typeof value === 'number' ? value : Number(String(value ?? '').trim());
+  return Number.isFinite(n) ? n : null;
+}
+
 function straightLineLabel(km) {
-  if (!Number.isFinite(km)) return '';
-  if (km < 1) return `直線約 ${Math.max(1, Math.round(km * 1000))} 公尺`;
-  const rounded = km < 10 ? km.toFixed(1) : String(Math.round(km));
-  return `直線約 ${rounded} 公里`;
+  const n = finiteCoord(km);
+  if (n == null) return '';
+  if (n < 1) return `直線約 ${Math.round(n * 1000)} 公尺`;
+  return `直線約 ${n.toFixed(1)} 公里`;
 }
 
 function haversineKm(a, b) {
+  const lat1 = finiteCoord(a?.lat);
+  const lng1 = finiteCoord(a?.lng ?? a?.lon);
+  const lat2 = finiteCoord(b?.lat);
+  const lng2 = finiteCoord(b?.lng ?? b?.lon);
+  if (lat1 == null || lng1 == null || lat2 == null || lng2 == null) return NaN;
   const R = 6371;
-  const dLat = (b.lat - a.lat) * Math.PI / 180;
-  const dLng = (b.lng - a.lng) * Math.PI / 180;
-  const lat1 = a.lat * Math.PI / 180;
-  const lat2 = b.lat * Math.PI / 180;
-  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
-  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLng = (lng2 - lng1) * Math.PI / 180;
+  const p1 = lat1 * Math.PI / 180;
+  const p2 = lat2 * Math.PI / 180;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(p1) * Math.cos(p2) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(Math.max(0, h))));
 }
 
 function roughTravelLabel(km) {

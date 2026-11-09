@@ -1,4 +1,4 @@
-const SHELL = 'leo-shell-v3';
+const SHELL = 'leo-shell-v4';
 const APP_SHELL = [
   '/',
   '/app.js',

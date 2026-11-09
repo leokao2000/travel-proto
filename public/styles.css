@@ -429,11 +429,12 @@ label.file-btn {
 .spot-pool, .spot-day { display: flex; flex-wrap: wrap; gap: 0.4rem; min-height: 52px; }
 .spot-day { margin: 0.45rem 0 0.2rem; }
 .spot-chip {
-  display: flex; align-items: center; gap: 0.35rem; max-width: 100%;
-  background: #fff; border: 1px solid var(--line); border-radius: 999px;
-  padding: 0.25rem 0.55rem 0.25rem 0.25rem; min-height: 44px; touch-action: none;
-  box-shadow: 0 4px 0 rgba(120, 86, 54, 0.08);
+  display: flex; align-items: center; gap: 0.4rem; max-width: 100%;
+  background: #fff; color: var(--ink); border: 1px solid var(--line); border-radius: 999px;
+  padding: 0.25rem 0.7rem 0.25rem 0.25rem; min-height: 44px; touch-action: none;
+  box-shadow: 0 4px 0 rgba(120, 86, 54, 0.08); font-weight: 700;
 }
+.spot-chip span { color: var(--ink); white-space: nowrap; }
 .spot-chip img, .spot-fallback {
   width: 36px; height: 36px; border-radius: 999px; object-fit: cover; flex: none;
 }
