@@ -533,6 +533,16 @@ label.file-btn {
 .mode-grid button.on { background: var(--accent-soft); border-color: var(--accent); }
 .spot-ghost { position: fixed; z-index: 80; pointer-events: none; opacity: 0.9; }
 @keyframes cozy-in { from { transform: translateY(6px); opacity: 0.4; } to { transform: none; opacity: 1; } }
+.wizard-pane input,
+.wizard-pane textarea,
+.stay-search input,
+.stay-search textarea {
+  margin-bottom: 0.875rem;
+}
+.wizard-pane .spot-pool,
+.wizard-pane .spot-placer {
+  margin-top: 0.75rem;
+}
 .wizard-pane, .spot-chip { animation: cozy-in 0.25s ease; }
 #import-body .import-item { border-top: 1px solid var(--line); padding-top: 0.6rem; margin-top: 0.6rem; }
 #print-root { display: none; }
