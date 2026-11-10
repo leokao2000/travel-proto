@@ -58,6 +58,7 @@ const state = {
   expandedReviews: new Set(),
   flightLookup: false,
   pushEnabled: false,
+  connection: 'online',
 };
 
 const $ = (sel, el = document) => el.querySelector(sel);
@@ -723,11 +724,19 @@ async function putTrip(patch) {
     guide: patch.guide ?? state.trip.guide ?? {},
     spots: patch.spots ?? state.trip.spots ?? [],
   };
+  if (state.connection === 'missing') {
+    throw new Error('伺服器上沒有這趟旅行，請先按上方「用這支手機上的資料恢復這趟旅行」');
+  }
   let data;
   try {
     data = await api(`/api/trips/${state.trip.id}`, { method: 'PUT', body: JSON.stringify(body) });
   } catch (err) {
-    if (navigator.onLine === false || err.message === 'Failed to fetch') {
+    const problem = tripAccessProblem(err.message);
+    if (problem === 'missing') {
+      showOfflineBanner('missing');
+      throw new Error('伺服器上沒有這趟旅行，請先按上方「用這支手機上的資料恢復這趟旅行」');
+    }
+    if (navigator.onLine === false || problem === 'offline') {
       throw new Error('離線時無法修改，以免蓋過旅伴的更新');
     }
     throw err;
@@ -2793,7 +2802,7 @@ function openLodgingSetup(country) {
 }
 
 function openActivityModal(date, activity) {
-  openModal(activity ? `${date} 編輯活動` : `${date} 新增活動`, `
+  openModal(activity ? `${formatMonthDay(date)} 編輯活動` : `${formatMonthDay(date)} 新增活動`, `
     <label>做什麼</label>
     <input id="a-text" maxlength="80" placeholder="例如：淺草寺" value="${escapeHtml(activity ? activityName(activity) : '')}" />
     <label>開始時間</label>
@@ -4468,26 +4477,80 @@ function taipeiTodayClient() {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
 }
 
-function showOfflineBanner(on) {
+function tripAccessProblem(message) {
+  const text = String(message || '');
+  if (text.includes('找不到旅行')) return 'missing';
+  if (text === 'Failed to fetch' || text === 'Load failed' || /NetworkError|internet connection/i.test(text)) return 'offline';
+  return '';
+}
+
+function showOfflineBanner(mode) {
   const banner = document.getElementById('offline-banner');
-  if (banner) banner.hidden = !on;
+  const text = document.getElementById('offline-banner-text');
+  const action = document.getElementById('offline-banner-action');
+  if (!banner) return;
+  const next = mode === 'missing' ? 'missing' : (mode ? 'offline' : false);
+  state.connection = next || 'online';
+  banner.hidden = !next;
+  if (!next) return;
+  if (text) {
+    text.textContent = next === 'missing'
+      ? '沒有找到旅行資料。這不是離線，是伺服器上已經沒有這趟旅行。這支手機還留著上次同步的內容。'
+      : '離線中，顯示上次同步的資料。離線時不能修改，以免蓋過旅伴的更新。';
+  }
+  if (action) action.hidden = next !== 'missing';
+}
+
+async function recoverCachedTrip() {
+  const cached = state.trip || await recallTrip(state.tripId);
+  if (!cached?.id || !cached.code) {
+    toast('這支手機上沒有可恢復的資料');
+    return;
+  }
+  const data = await api('/api/trips/restore', {
+    method: 'POST',
+    body: JSON.stringify({ trip: cached, memberId: state.memberId }),
+  });
+  if (data.memberId) {
+    state.memberId = data.memberId;
+    persistSession();
+  }
+  adoptTrip(data.trip);
+  showOfflineBanner(false);
+  render();
+  toast(data.created ? '已用這支手機上的資料恢復，邀請碼維持不變' : '已接上伺服器上的旅行');
 }
 
 function bindOfflineBanner() {
-  const sync = () => showOfflineBanner(navigator.onLine === false);
+  const action = document.getElementById('offline-banner-action');
+  action?.addEventListener('click', async () => {
+    action.disabled = true;
+    try {
+      await recoverCachedTrip();
+    } catch (err) {
+      toast(err.message || '沒有恢復');
+    } finally {
+      action.disabled = false;
+    }
+  });
   window.addEventListener('online', () => {
-    sync();
+    if (state.connection === 'missing') return;
+    showOfflineBanner(false);
     if (state.trip) {
       api(`/api/trips/${state.trip.id}?since=${state.lastSync}`).then((data) => {
         if (!data.unchanged && data.trip) {
           adoptTrip(data.trip);
           render();
         }
-      }).catch(() => {});
+      }).catch((err) => {
+        if (tripAccessProblem(err.message) === 'missing') showOfflineBanner('missing');
+      });
     }
   });
-  window.addEventListener('offline', sync);
-  sync();
+  window.addEventListener('offline', () => {
+    if (state.trip) showOfflineBanner('offline');
+  });
+  if (navigator.onLine === false && state.tripId) showOfflineBanner('offline');
 }
 
 function registerAppShell() {
@@ -4982,17 +5045,20 @@ async function boot() {
     try {
       const data = await api(`/api/trips/${state.tripId}`);
       adoptTrip(data.trip);
+      showOfflineBanner(false);
       showApp();
       maybeWelcomeTheme();
       return;
-    } catch (_) {
+    } catch (err) {
       const cached = await recallTrip(state.tripId);
-      if (cached) {
+      const problem = tripAccessProblem(err.message) || (navigator.onLine === false ? 'offline' : '');
+      if (cached && (problem === 'missing' || problem === 'offline')) {
         adoptTrip(cached);
-        showOfflineBanner(true);
+        showOfflineBanner(problem);
         showApp();
         return;
       }
+      if (problem === 'missing') toast('沒有找到旅行資料');
       localStorage.removeItem('tp_tripId');
       localStorage.removeItem('tp_memberId');
       state.tripId = null;
