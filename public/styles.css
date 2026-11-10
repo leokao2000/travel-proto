@@ -119,6 +119,7 @@ label { display: block; font-size: 0.85rem; color: var(--muted); margin: 0.6rem 
   display: block; width: min(100%, 22rem); margin: 0.45rem auto 0;
   min-height: 44px; background: #fff; color: #78350f;
 }
+.offline-banner button[hidden] { display: none; }
 .offline-banner[hidden] { display: none; }
 .topbar {
   position: sticky; top: 0; z-index: 10;

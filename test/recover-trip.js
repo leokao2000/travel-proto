@@ -15,8 +15,11 @@ assert.strictEqual(sandbox.tripAccessProblem('找不到旅行'), 'missing');
 assert.strictEqual(sandbox.tripAccessProblem('Failed to fetch'), 'offline');
 assert.strictEqual(sandbox.tripAccessProblem('Load failed'), 'offline');
 assert.strictEqual(sandbox.tripAccessProblem('無效的成員'), '');
-assert.ok(appSrc.includes('用這支手機上的資料恢復這趟旅行'));
+assert.ok(appSrc.includes('用這支手機上的資料恢復'));
+assert.ok(appSrc.includes('重新開始'));
+assert.ok(appSrc.includes('手機上的舊資料會清掉，確定重新開始？'));
 assert.ok(appSrc.includes('這不是離線'));
+assert.ok(appSrc.includes('可以重新開始一趟'));
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'leo-recover-'));
 const port = 3519;

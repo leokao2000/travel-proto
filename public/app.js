@@ -725,7 +725,7 @@ async function putTrip(patch) {
     spots: patch.spots ?? state.trip.spots ?? [],
   };
   if (state.connection === 'missing') {
-    throw new Error('伺服器上沒有這趟旅行，請先按上方「用這支手機上的資料恢復這趟旅行」');
+    throw new Error('伺服器上沒有這趟旅行，請先按上方「用這支手機上的資料恢復」');
   }
   let data;
   try {
@@ -734,7 +734,7 @@ async function putTrip(patch) {
     const problem = tripAccessProblem(err.message);
     if (problem === 'missing') {
       showOfflineBanner('missing');
-      throw new Error('伺服器上沒有這趟旅行，請先按上方「用這支手機上的資料恢復這趟旅行」');
+      throw new Error('伺服器上沒有這趟旅行，請先按上方「用這支手機上的資料恢復」');
     }
     if (navigator.onLine === false || problem === 'offline') {
       throw new Error('離線時無法修改，以免蓋過旅伴的更新');
@@ -4464,6 +4464,10 @@ function bindHome() {
       showApp();
       toast('已加入旅行');
     } catch (err) {
+      if ((err.message || '').includes('找不到此邀請碼') || tripAccessProblem(err.message) === 'missing') {
+        showOfflineBanner('gone');
+        return;
+      }
       toast(err.message);
     }
   });
@@ -4487,18 +4491,22 @@ function tripAccessProblem(message) {
 function showOfflineBanner(mode) {
   const banner = document.getElementById('offline-banner');
   const text = document.getElementById('offline-banner-text');
-  const action = document.getElementById('offline-banner-action');
+  const recover = document.getElementById('offline-banner-action');
+  const restart = document.getElementById('offline-banner-restart');
   if (!banner) return;
-  const next = mode === 'missing' ? 'missing' : (mode ? 'offline' : false);
+  const next = mode === 'missing' || mode === 'gone' || mode === 'offline' ? mode : (mode ? 'offline' : false);
   state.connection = next || 'online';
   banner.hidden = !next;
   if (!next) return;
   if (text) {
     text.textContent = next === 'missing'
       ? '沒有找到旅行資料。這不是離線，是伺服器上已經沒有這趟旅行。這支手機還留著上次同步的內容。'
-      : '離線中，顯示上次同步的資料。離線時不能修改，以免蓋過旅伴的更新。';
+      : next === 'gone'
+        ? '沒有找到旅行資料。這趟旅行在伺服器上已經沒有了，可以重新開始一趟。'
+        : '離線中，顯示上次同步的資料。離線時不能修改，以免蓋過旅伴的更新。';
   }
-  if (action) action.hidden = next !== 'missing';
+  if (recover) recover.hidden = next !== 'missing';
+  if (restart) restart.hidden = next !== 'missing' && next !== 'gone';
 }
 
 async function recoverCachedTrip() {
@@ -4521,8 +4529,37 @@ async function recoverCachedTrip() {
   toast(data.created ? '已用這支手機上的資料恢復，邀請碼維持不變' : '已接上伺服器上的旅行');
 }
 
+async function forgetCachedTrip() {
+  const tripId = state.tripId || state.trip?.id;
+  if (tripId && 'caches' in window) {
+    try {
+      const cache = await caches.open('leo-last-trip');
+      await cache.delete(`/offline-trip/${tripId}`);
+    } catch (_) {}
+  }
+  clearInterval(state.pollTimer);
+  state.trip = null;
+  state.tripId = null;
+  state.memberId = null;
+  localStorage.removeItem('tp_tripId');
+  localStorage.removeItem('tp_memberId');
+}
+
+async function restartTrip() {
+  const cached = state.trip || await recallTrip(state.tripId);
+  if (cached) {
+    const ok = await askYesNo('手機上的舊資料會清掉，確定重新開始？', { title: '重新開始', yes: '重新開始', no: '取消' });
+    if (!ok) return;
+  }
+  await forgetCachedTrip();
+  showOfflineBanner(false);
+  showHome();
+  $('#create-title')?.focus();
+}
+
 function bindOfflineBanner() {
   const action = document.getElementById('offline-banner-action');
+  const restart = document.getElementById('offline-banner-restart');
   action?.addEventListener('click', async () => {
     action.disabled = true;
     try {
@@ -4533,8 +4570,11 @@ function bindOfflineBanner() {
       action.disabled = false;
     }
   });
+  restart?.addEventListener('click', () => {
+    restartTrip().catch((err) => toast(err.message || '沒有重新開始'));
+  });
   window.addEventListener('online', () => {
-    if (state.connection === 'missing') return;
+    if (state.connection === 'missing' || state.connection === 'gone') return;
     showOfflineBanner(false);
     if (state.trip) {
       api(`/api/trips/${state.trip.id}?since=${state.lastSync}`).then((data) => {
@@ -5052,13 +5092,24 @@ async function boot() {
     } catch (err) {
       const cached = await recallTrip(state.tripId);
       const problem = tripAccessProblem(err.message) || (navigator.onLine === false ? 'offline' : '');
-      if (cached && (problem === 'missing' || problem === 'offline')) {
+      if (problem === 'missing' && cached) {
         adoptTrip(cached);
-        showOfflineBanner(problem);
+        showOfflineBanner('missing');
         showApp();
         return;
       }
-      if (problem === 'missing') toast('沒有找到旅行資料');
+      if (problem === 'offline' && cached) {
+        adoptTrip(cached);
+        showOfflineBanner('offline');
+        showApp();
+        return;
+      }
+      if (problem === 'missing') {
+        await forgetCachedTrip();
+        showHome();
+        showOfflineBanner('gone');
+        return;
+      }
       localStorage.removeItem('tp_tripId');
       localStorage.removeItem('tp_memberId');
       state.tripId = null;
