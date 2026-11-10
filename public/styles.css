@@ -490,7 +490,8 @@ label.file-btn {
   display: inline-flex; align-items: center; justify-content: center;
   background: #ffe1b5; color: #8a5a2b; font-weight: 700;
 }
-.spot-distance { width: 100%; color: var(--muted); font-size: 0.78rem; }
+.spot-distance, .day-weather { width: 100%; color: var(--ink); font-size: 0.82rem; margin: 0.15rem 0 0.35rem; }
+.spot-transit-note { width: 100%; font-size: 0.75rem; }
 .wizard-steps { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-bottom: 0.6rem; }
 .wizard-steps button {
   flex: 1 1 30%; min-height: 36px; padding: 0.2rem; border-radius: 999px;

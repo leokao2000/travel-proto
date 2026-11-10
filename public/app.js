@@ -1145,6 +1145,7 @@ function renderTimeline() {
             <div class="day-head">
               <div>
                 <strong>${formatMonthDay(date)}（週${weekday(date)}）</strong>
+                ${dayWeatherHtml(date)}
                 <div>${countries.map((c) => `<button type="button" class="chip" data-chip-date="${date}" data-country-key="${escapeHtml(countryKey(c))}" aria-label="更改${escapeHtml(c.name)}">${renderPattern(c, 1, 'sm')}${escapeHtml(c.name)} ${escapeHtml(offsetLabel(c.tz, date))}</button>`).join(' ')}</div>
               </div>
               <button class="ghost" data-day-map="${date}" type="button">地圖</button>
@@ -1321,6 +1322,7 @@ function renderTimeline() {
   $$('[data-open-guide]', el).forEach((btn) => btn.addEventListener('click', () => openGuide(state.trip.guide?.step || 0)));
   bindSpotDrag(el);
   bindDayNav(el);
+  refreshLiveExtras(el);
   $$('[data-day-map]', el).forEach((btn) => btn.addEventListener('click', () => openMapSheet(btn.dataset.dayMap)));
   $('#btn-save-device-timeline')?.addEventListener('click', async () => {
     try {
@@ -1831,7 +1833,8 @@ async function restoreBackupObject(data, { confirm = false } = {}) {
     });
   }
   adoptTrip(body.trip);
-  render();
+  showOfflineBanner(false);
+  showApp();
   toast(body.created ? '已從備份建立旅行' : '已還原旅行');
 }
 
@@ -1944,6 +1947,36 @@ async function backupToDrive() {
       : '已備份到 Google Drive';
   }
   toast('已備份到 Google Drive');
+}
+
+function offerLeaveGuide(close) {
+  const wrap = document.createElement('div');
+  wrap.className = 'modal-backdrop';
+  const driveReady = Boolean(state.googleClientId);
+  wrap.innerHTML = `<div class="modal"><h3>先離開，等等再排</h3><p>這份進度已在這支手機。伺服器重新部署後可能清掉，可以再存一份。</p><div class="stack"><button type="button" id="leave-drive" ${driveReady ? '' : 'disabled'}>存到 Google Drive 再離開</button><button type="button" class="secondary" id="leave-device">存到這台裝置再離開</button><button type="button" class="secondary" id="leave-now">先離開</button><button type="button" class="ghost" data-cancel>取消</button></div>${driveReady ? '' : '<div class="muted">Google Drive 尚未設定。需要在 Google Cloud 建立網頁用的 OAuth 用戶端編號，並設到 Render 的 GOOGLE_OAUTH_CLIENT_ID。</div>'}</div>`;
+  document.body.appendChild(wrap);
+  const dismiss = () => wrap.remove();
+  $('[data-cancel]', wrap).addEventListener('click', dismiss);
+  wrap.addEventListener('click', (event) => { if (event.target === wrap) dismiss(); });
+  $('#leave-now', wrap).addEventListener('click', () => { dismiss(); close(); });
+  $('#leave-device', wrap).addEventListener('click', async () => {
+    try {
+      await saveDeviceBackup();
+      dismiss();
+      close();
+    } catch (err) {
+      toast(err.message || '沒有存成');
+    }
+  });
+  $('#leave-drive', wrap).addEventListener('click', async () => {
+    try {
+      await backupToDrive();
+      dismiss();
+      close();
+    } catch (err) {
+      toast(err.message || '沒有存到 Google Drive');
+    }
+  });
 }
 
 async function listDriveBackups() {
@@ -3907,10 +3940,12 @@ function spotDayHtml(date) {
     bits.push(spotChip(spot));
     const next = spots[index + 1];
     if (next && spot.lat != null && next.lat != null && spot.lng != null && next.lng != null) {
-      bits.push(`<div class="spot-distance">${straightLineLabel(haversineKm(spot, next))}</div>`);
+      const label = routeLabels.get(routeKey(spot, next)) || straightLineLabel(haversineKm(spot, next));
+      bits.push(`<div class="spot-distance" data-route-key="${routeKey(spot, next)}">${escapeHtml(label)}</div>`);
     }
   });
-  return `<div class="spot-day" data-drop-day="${date}">${bits.join('') || '<div class="muted">把景點拖到這一天</div>'}</div>`;
+  const transit = spots.length > 1 ? '<div class="muted spot-transit-note">不含大眾運輸。免費來源只有開車與步行。</div>' : '';
+  return `<div class="spot-day" data-drop-day="${date}">${bits.join('') || '<div class="muted">把景點拖到這一天</div>'}${transit}</div>`;
 }
 
 function arrangeDaysHtml() {
@@ -3920,6 +3955,7 @@ function arrangeDaysHtml() {
   return `${dayNavHtml(dates, 'wizard-day-pager')}<div class="day-pager wizard-days" id="wizard-day-pager">${days.map(([date]) => `
     <section class="day" data-day-date="${date}">
       <strong>${formatMonthDay(date)}（週${weekday(date)}）</strong>
+      ${dayWeatherHtml(date)}
       ${spotDayHtml(date)}
     </section>`).join('')}</div>`;
 }
@@ -4164,7 +4200,10 @@ function openGuide(startStep) {
         paint();
       } catch (err) { toast(err.message || '這一步還沒好'); }
     });
-    $('#wizard-close', wrap)?.addEventListener('click', async () => { try { await collect(false); } catch (_) {} close(); });
+    $('#wizard-close', wrap)?.addEventListener('click', async () => {
+      try { await collect(false); } catch (_) {}
+      offerLeaveGuide(close);
+    });
     $('#g-ai', wrap)?.addEventListener('click', () => runGuideAi());
     $('#g-spot-add', wrap)?.addEventListener('click', async () => {
       try { await addSpotFromSearch($('#g-spot', wrap)?.value || ''); paint(); }
@@ -4174,6 +4213,7 @@ function openGuide(startStep) {
     $('#g-hotel-read', wrap)?.addEventListener('click', () => readHotelPaste($('#g-hotel', wrap)?.value || ''));
     bindSpotDrag(wrap);
     bindDayNav(wrap);
+    refreshLiveExtras(wrap);
   };
   async function collect(strict) {
     const field = $('#g-dest', wrap);
@@ -4471,6 +4511,21 @@ function bindHome() {
       toast(err.message);
     }
   });
+  $('#btn-home-drive')?.addEventListener('click', async () => {
+    if (!state.googleClientId) {
+      const note = $('#home-drive-note');
+      if (note) {
+        note.hidden = false;
+        note.textContent = 'Google Drive 尚未設定。需要在 Google Cloud 建立網頁用的 OAuth 用戶端編號，並設到 Render 的 GOOGLE_OAUTH_CLIENT_ID。';
+      }
+      return;
+    }
+    try {
+      await restoreFromDrive();
+    } catch (err) {
+      toast(err.message || '無法從 Google Drive 繼續');
+    }
+  });
   $$('.tabs button').forEach((b) => b.addEventListener('click', () => {
     state.tab = b.dataset.tab;
     render();
@@ -4678,6 +4733,139 @@ function straightLineLabel(km) {
   if (n == null) return '';
   if (n < 1) return `直線約 ${Math.round(n * 1000)} 公尺`;
   return `直線約 ${n.toFixed(1)} 公里`;
+}
+
+const routeLabels = new Map();
+const routePromises = new Map();
+const weatherLines = new Map();
+
+function routeKey(a, b) {
+  return [a.lat, a.lng, b.lat, b.lng].map((n) => Number(n).toFixed(4)).join(',');
+}
+
+function formatRoutedLeg(data) {
+  const km = finiteCoord(data?.km);
+  const minutes = finiteCoord(data?.minutes);
+  if (km == null || minutes == null) return '';
+  const distance = km < 1 ? `${Math.max(1, Math.round(km * 1000))} 公尺` : `${km.toFixed(1)} 公里`;
+  const how = data.mode === 'walking' ? '步行' : '開車';
+  return `${how}約 ${Math.max(1, Math.round(minutes))} 分鐘 · ${distance}`;
+}
+
+function weatherIcon(code) {
+  const c = Number(code);
+  if (!Number.isFinite(c)) return '🌡️';
+  if (c === 0) return '☀️';
+  if (c <= 3) return '⛅';
+  if (c === 45 || c === 48) return '🌫️';
+  if (c >= 71 && c <= 77) return '❄️';
+  if (c >= 95) return '⛈️';
+  if (c >= 51) return '🌧️';
+  return '☁️';
+}
+
+function weatherLine(day) {
+  if (!day || finiteCoord(day.high) == null || finiteCoord(day.low) == null) return '';
+  const icon = weatherIcon(day.code);
+  const temps = `${Math.round(day.high)}° / ${Math.round(day.low)}°`;
+  if (day.kind === 'climate') {
+    const rain = finiteCoord(day.precipMm) == null ? '' : ` · 降雨約 ${Number(day.precipMm).toFixed(1)} 毫米`;
+    return `往年同期參考 · ${icon} ${temps}${rain}`;
+  }
+  const rain = finiteCoord(day.rain) == null ? '' : ` · 降雨 ${Math.round(day.rain)}%`;
+  return `${icon} ${temps}${rain}`;
+}
+
+function dayWeatherAnchor(date) {
+  const stay = nightLodging(date);
+  if (stay && finiteCoord(stay.lat) != null && finiteCoord(stay.lng) != null) {
+    return { lat: finiteCoord(stay.lat), lng: finiteCoord(stay.lng) };
+  }
+  const spot = spotsFor(date).find((item) => finiteCoord(item.lat) != null && finiteCoord(item.lng) != null);
+  if (spot) return { lat: finiteCoord(spot.lat), lng: finiteCoord(spot.lng) };
+  return null;
+}
+
+function dayWeatherHtml(date) {
+  const anchor = dayWeatherAnchor(date);
+  if (!anchor) return '<div class="day-weather muted">這天還沒有座標，無法查天氣</div>';
+  const key = `${anchor.lat.toFixed(2)},${anchor.lng.toFixed(2)}|${date}`;
+  const known = weatherLines.get(key);
+  return `<div class="day-weather" data-weather-date="${date}" data-lat="${anchor.lat}" data-lng="${anchor.lng}">${escapeHtml(known || '讀取天氣…')}</div>`;
+}
+
+async function ensureRoute(a, b) {
+  const key = routeKey(a, b);
+  if (routeLabels.has(key)) return routeLabels.get(key);
+  if (routePromises.has(key)) return routePromises.get(key);
+  const job = api(`/api/route?from=${a.lat},${a.lng}&to=${b.lat},${b.lng}`)
+    .then((data) => {
+      const label = formatRoutedLeg(data) || straightLineLabel(haversineKm(a, b));
+      routeLabels.set(key, label);
+      return label;
+    })
+    .catch(() => {
+      const label = straightLineLabel(haversineKm(a, b));
+      routeLabels.set(key, label);
+      return label;
+    });
+  routePromises.set(key, job);
+  return job;
+}
+
+async function prefetchRoutesForTrip() {
+  const jobs = [];
+  for (const [date] of buildTimelineDays()) {
+    const spots = spotsFor(date);
+    for (let i = 0; i < spots.length - 1; i += 1) {
+      const a = spots[i];
+      const b = spots[i + 1];
+      if (finiteCoord(a.lat) == null || finiteCoord(b.lat) == null) continue;
+      jobs.push(ensureRoute(a, b));
+    }
+  }
+  await Promise.all(jobs);
+}
+
+async function prefetchWeatherForTrip() {
+  const groups = new Map();
+  for (const [date] of buildTimelineDays()) {
+    const anchor = dayWeatherAnchor(date);
+    if (!anchor) continue;
+    const place = `${anchor.lat.toFixed(2)},${anchor.lng.toFixed(2)}`;
+    if (!groups.has(place)) groups.set(place, { ...anchor, dates: [] });
+    groups.get(place).dates.push(date);
+  }
+  await Promise.all([...groups.values()].map(async (group) => {
+    const missing = group.dates.filter((date) => !weatherLines.has(`${group.lat.toFixed(2)},${group.lng.toFixed(2)}|${date}`));
+    if (!missing.length) return;
+    try {
+      const data = await api(`/api/weather?lat=${group.lat}&lng=${group.lng}&dates=${missing.join(',')}`);
+      for (const date of missing) {
+        const line = weatherLine(data.days?.[date]);
+        weatherLines.set(`${group.lat.toFixed(2)},${group.lng.toFixed(2)}|${date}`, line || '暫時無法查天氣');
+      }
+    } catch (_) {
+      for (const date of missing) weatherLines.set(`${group.lat.toFixed(2)},${group.lng.toFixed(2)}|${date}`, '暫時無法查天氣');
+    }
+  }));
+}
+
+function paintLiveExtras(root) {
+  $$('[data-route-key]', root).forEach((node) => {
+    const label = routeLabels.get(node.dataset.routeKey);
+    if (label) node.textContent = label;
+  });
+  $$('[data-weather-date]', root).forEach((node) => {
+    const key = `${Number(node.dataset.lat).toFixed(2)},${Number(node.dataset.lng).toFixed(2)}|${node.dataset.weatherDate}`;
+    const line = weatherLines.get(key);
+    if (line) node.textContent = line;
+  });
+}
+
+function refreshLiveExtras(root) {
+  prefetchRoutesForTrip().then(() => paintLiveExtras(root)).catch(() => {});
+  prefetchWeatherForTrip().then(() => paintLiveExtras(root)).catch(() => {});
 }
 
 function haversineKm(a, b) {
@@ -4945,11 +5133,26 @@ function buildPrintHtml() {
     const nights = lodgingOn(date);
     const checkouts = lodgingCheckoutOn(date);
     const rides = (trip.transports || []).filter((ride) => calendarDate(ride.date) === date || calendarDate(ride.arriveDate) === date);
+    const spots = spotsFor(date);
+    const spotBlocks = [];
+    const weatherAnchor = dayWeatherAnchor(date);
+    const weather = weatherAnchor ? weatherLines.get(`${weatherAnchor.lat.toFixed(2)},${weatherAnchor.lng.toFixed(2)}|${date}`) : '';
+    if (weather) spotBlocks.push(`<div class="print-item"><strong>天氣</strong> ${escapeHtml(weather)}</div>`);
+    spots.forEach((spot, index) => {
+      spotBlocks.push(`<div class="print-item"><strong>景點</strong> ${escapeHtml(spot.name || '')}</div>`);
+      const next = spots[index + 1];
+      if (next && spot.lat != null && next.lat != null) {
+        const label = routeLabels.get(routeKey(spot, next)) || straightLineLabel(haversineKm(spot, next));
+        if (label) spotBlocks.push(`<div class="print-item">${escapeHtml(label)}</div>`);
+      }
+    });
+    if (spots.length > 1) spotBlocks.push('<div class="print-item">不含大眾運輸。免費來源只有開車與步行。</div>');
     const blocks = [
-      ...nights.map((item) => `<div class="print-item"><strong>住宿</strong> ${escapeHtml(item.name || '')} <span>${escapeHtml(stayStatus(item, date))}</span></div>`),
+      ...spotBlocks,
+      ...nights.map((item) => `<div class="print-item"><strong>住宿</strong> ${escapeHtml(item.name || '')} <span>${escapeHtml(stayStatus(item, date))}</span> ${escapeHtml(formatMonthDay(item.checkIn) || '')} → ${escapeHtml(formatMonthDay(item.checkOut) || '')}</div>`),
       ...checkouts.map((item) => `<div class="print-item"><strong>退房</strong> ${escapeHtml(item.name || '')}</div>`),
       ...(nightLodging(date) ? [] : (trip.transports || []).filter((ride) => calendarDate(ride.date) === date && rideIsOvernight(ride)).map((ride) => `<div class="print-item"><strong>${overnightStayTitle(ride)}</strong> ${escapeHtml(ride.from || '')} → ${escapeHtml(ride.to || '')} ${escapeHtml(rideScheduleText(ride, false))}</div>`)),
-      ...acts.map((item) => `<div class="print-item"><strong>活動</strong> ${escapeHtml(activityScheduleText(item, date, false))} ${escapeHtml(activityName(item))}${item.place ? ` · ${escapeHtml(item.place)}` : ''}</div>`),
+      ...acts.filter((item) => !item.spotId).map((item) => `<div class="print-item"><strong>活動</strong> ${escapeHtml(activityScheduleText(item, date, false))} ${escapeHtml(activityName(item))}${item.place ? ` · ${escapeHtml(item.place)}` : ''}</div>`),
       ...foods.map((item) => `<div class="print-item"><strong>餐廳</strong> ${item.time ? `${escapeHtml(item.time)} ` : ''}${escapeHtml(item.name || '')}${item.place ? ` · ${escapeHtml(item.place)}` : ''}</div>`),
       ...rides.map((ride) => `<div class="print-item"><strong>交通</strong> ${escapeHtml(ride.type || '')} ${escapeHtml(ride.from || '')} → ${escapeHtml(ride.to || '')} ${escapeHtml(rideScheduleText(ride, calendarDate(ride.date) !== date))}</div>`),
     ];
@@ -4967,13 +5170,16 @@ function buildPrintHtml() {
   `;
 }
 
-function exportTripPdf() {
+async function exportTripPdf() {
   let root = document.getElementById('print-root');
   if (!root) {
     root = document.createElement('div');
     root.id = 'print-root';
     document.body.appendChild(root);
   }
+  try {
+    await Promise.all([prefetchRoutesForTrip(), prefetchWeatherForTrip()]);
+  } catch (_) {}
   root.innerHTML = buildPrintHtml();
   window.print();
 }

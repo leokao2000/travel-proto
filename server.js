@@ -357,6 +357,195 @@ app.get('/api/lodging-search', async (req, res) => {
   }
 });
 
+const ROUTE_FILE = path.join(DATA_DIR, 'route-cache.json');
+const WEATHER_FILE = path.join(DATA_DIR, 'weather-cache.json');
+let routeLock = Promise.resolve();
+let weatherLock = Promise.resolve();
+
+function withSlot(lockName, fn) {
+  const current = lockName === 'route' ? routeLock : weatherLock;
+  const run = current.then(fn, fn);
+  const next = run.then(
+    () => new Promise((resolve) => setTimeout(resolve, 1100)),
+    () => new Promise((resolve) => setTimeout(resolve, 1100)),
+  );
+  if (lockName === 'route') routeLock = next;
+  else weatherLock = next;
+  return run;
+}
+
+function readJsonCache(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+function writeJsonCache(file, cache) {
+  ensureData();
+  const keys = Object.keys(cache);
+  if (keys.length > 500) {
+    keys.slice(0, keys.length - 400).forEach((key) => delete cache[key]);
+  }
+  fs.writeFileSync(file, JSON.stringify(cache));
+}
+
+function taipeiTodayServer() {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+}
+
+function shiftIsoServer(iso, days) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ''));
+  if (!match) return '';
+  const dt = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]) + days));
+  const y = dt.getUTCFullYear();
+  const m = String(dt.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(dt.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+app.get('/api/route', async (req, res) => {
+  const from = String(req.query.from || '').split(',').map(Number);
+  const to = String(req.query.to || '').split(',').map(Number);
+  if (from.length !== 2 || to.length !== 2 || from.concat(to).some((n) => !Number.isFinite(n))) {
+    return res.status(400).json({ error: '缺少座標' });
+  }
+  const [lat1, lng1, lat2, lng2] = [from[0], from[1], to[0], to[1]];
+  const kmLine = (() => {
+    const R = 6371;
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLng = (lng2 - lng1) * Math.PI / 180;
+    const p1 = lat1 * Math.PI / 180;
+    const p2 = lat2 * Math.PI / 180;
+    const h = Math.sin(dLat / 2) ** 2 + Math.cos(p1) * Math.cos(p2) * Math.sin(dLng / 2) ** 2;
+    return 2 * R * Math.asin(Math.min(1, Math.sqrt(Math.max(0, h))));
+  })();
+  const mode = kmLine < 1.5 ? 'walking' : 'driving';
+  const key = `${lat1.toFixed(4)},${lng1.toFixed(4)};${lat2.toFixed(4)},${lng2.toFixed(4)};${mode}`;
+  const cache = readJsonCache(ROUTE_FILE);
+  if (cache[key] && Number.isFinite(cache[key].km)) return res.json({ ...cache[key], cached: true });
+  const profile = mode === 'walking' ? 'foot' : 'driving';
+  const base = String(process.env.OSRM_API_URL || 'https://router.project-osrm.org').replace(/\/$/, '');
+  const url = `${base}/route/v1/${profile}/${lng1},${lat1};${lng2},${lat2}?overview=false`;
+  try {
+    const found = await withSlot('route', async () => {
+      const again = readJsonCache(ROUTE_FILE);
+      if (again[key] && Number.isFinite(again[key].km)) return again[key];
+      const upstream = await fetch(url, {
+        headers: { 'User-Agent': 'LeoPrototype/1.0 (https://travel-proto.onrender.com)', Accept: 'application/json' },
+        signal: AbortSignal.timeout(12000),
+      });
+      const data = await upstream.json().catch(() => ({}));
+      const route = data?.routes?.[0];
+      if (!upstream.ok || data?.code !== 'Ok' || !route) return null;
+      const saved = {
+        mode,
+        minutes: Math.max(1, Math.round(Number(route.duration) / 60)),
+        km: Math.round(Number(route.distance) / 100) / 10,
+      };
+      const next = readJsonCache(ROUTE_FILE);
+      next[key] = saved;
+      writeJsonCache(ROUTE_FILE, next);
+      return saved;
+    });
+    if (!found) return res.status(502).json({ error: '無法計算路線' });
+    res.json({ ...found, cached: false });
+  } catch (err) {
+    console.error('route failed', err?.name || 'error');
+    res.status(502).json({ error: '無法計算路線' });
+  }
+});
+
+function average(nums) {
+  const list = nums.filter((n) => Number.isFinite(n));
+  if (!list.length) return null;
+  return list.reduce((sum, n) => sum + n, 0) / list.length;
+}
+
+app.get('/api/weather', async (req, res) => {
+  const lat = Number(req.query.lat);
+  const lng = Number(req.query.lng);
+  const dates = String(req.query.dates || '').split(',').map((d) => d.trim()).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)).slice(0, 40);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || !dates.length) return res.status(400).json({ error: '缺少位置或日期' });
+  const today = taipeiTodayServer();
+  const horizon = shiftIsoServer(today, 15);
+  const forecastDates = dates.filter((d) => d >= today && d <= horizon);
+  const climateDates = dates.filter((d) => d < today || d > horizon);
+  const cache = readJsonCache(WEATHER_FILE);
+  const place = `${lat.toFixed(2)},${lng.toFixed(2)}`;
+  const days = {};
+  const needForecast = forecastDates.filter((d) => !cache[`${place}|${d}`]);
+  const needClimate = climateDates.filter((d) => !cache[`${place}|${d}`]);
+  const forecastBase = String(process.env.OPEN_METEO_FORECAST_URL || 'https://api.open-meteo.com/v1/forecast');
+  const archiveBase = String(process.env.OPEN_METEO_ARCHIVE_URL || 'https://archive-api.open-meteo.com/v1/archive');
+  try {
+    if (needForecast.length) {
+      await withSlot('weather', async () => {
+        const url = `${forecastBase}?latitude=${lat}&longitude=${lng}&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=auto&forecast_days=16`;
+        const upstream = await fetch(url, { headers: { Accept: 'application/json', 'User-Agent': 'LeoPrototype/1.0' }, signal: AbortSignal.timeout(12000) });
+        const data = await upstream.json().catch(() => ({}));
+        const daily = data?.daily || {};
+        const times = daily.time || [];
+        const next = readJsonCache(WEATHER_FILE);
+        times.forEach((time, index) => {
+          next[`${place}|${time}`] = {
+            kind: 'forecast',
+            code: daily.weather_code?.[index] ?? null,
+            high: daily.temperature_2m_max?.[index] ?? null,
+            low: daily.temperature_2m_min?.[index] ?? null,
+            rain: daily.precipitation_probability_max?.[index] ?? null,
+          };
+        });
+        writeJsonCache(WEATHER_FILE, next);
+      });
+    }
+    if (needClimate.length) {
+      const months = [...new Set(needClimate.map((d) => d.slice(5)))];
+      const year = Number(today.slice(0, 4));
+      await withSlot('weather', async () => {
+        const start = `${year - 5}-01-01`;
+        const end = `${year - 1}-12-31`;
+        const url = `${archiveBase}?latitude=${lat}&longitude=${lng}&start_date=${start}&end_date=${end}&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum&timezone=auto`;
+        const upstream = await fetch(url, { headers: { Accept: 'application/json', 'User-Agent': 'LeoPrototype/1.0' }, signal: AbortSignal.timeout(20000) });
+        const data = await upstream.json().catch(() => ({}));
+        if (!upstream.ok || !data?.daily?.time) return;
+        const daily = data?.daily || {};
+        const times = daily.time || [];
+        const buckets = {};
+        times.forEach((time, index) => {
+          const key = time.slice(5);
+          if (!months.includes(key)) return;
+          if (!buckets[key]) buckets[key] = { high: [], low: [], precip: [], code: [] };
+          buckets[key].high.push(Number(daily.temperature_2m_max?.[index]));
+          buckets[key].low.push(Number(daily.temperature_2m_min?.[index]));
+          buckets[key].precip.push(Number(daily.precipitation_sum?.[index]));
+          buckets[key].code.push(Number(daily.weather_code?.[index]));
+        });
+        const next = readJsonCache(WEATHER_FILE);
+        for (const date of needClimate) {
+          const bucket = buckets[date.slice(5)] || { high: [], low: [], precip: [], code: [] };
+          const codes = bucket.code.filter((n) => Number.isFinite(n));
+          next[`${place}|${date}`] = {
+            kind: 'climate',
+            code: codes.length ? codes.sort((a, b) => a - b)[Math.floor(codes.length / 2)] : null,
+            high: average(bucket.high),
+            low: average(bucket.low),
+            precipMm: average(bucket.precip),
+          };
+        }
+        writeJsonCache(WEATHER_FILE, next);
+      });
+    }
+    const fresh = readJsonCache(WEATHER_FILE);
+    for (const date of dates) days[date] = fresh[`${place}|${date}`] || null;
+    res.json({ days });
+  } catch (err) {
+    console.error('weather failed', err?.name || 'error');
+    res.status(502).json({ error: '暫時無法查天氣' });
+  }
+});
+
 async function lookupGeo(query) {
   const key = query.toLowerCase();
   const cache = readGeoCache();
